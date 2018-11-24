@@ -1,4 +1,4 @@
-require File.expand_path('../spec_helper', __FILE__)
+require_relative 'spec_helper'
 
 load_extension("kernel")
 
@@ -52,6 +52,13 @@ describe "C-API Kernel function" do
       @s.rb_block_call_no_func(ary) do |i|
         i + 1
       end.should == [2, 4, 6]
+    end
+  end
+
+  describe "rb_frame_this_func" do
+    it "returns the name of the method called" do
+      @s.rb_frame_this_func_test.should == :rb_frame_this_func_test
+      @s.rb_frame_this_func_test_again.should == :rb_frame_this_func_test_again
     end
   end
 
@@ -193,9 +200,21 @@ describe "C-API Kernel function" do
       @s.rb_yield(1) { break 73 }.should == 73
     end
 
-    it "rb_yield through a callback to a block that breaks with a value returns the value" do
-      @s.rb_yield_indirected(1) { break 73 }.should == 73
+    platform_is_not :"solaris2.10" do # NOTE: i386-pc-solaris2.10
+      it "rb_yield through a callback to a block that breaks with a value returns the value" do
+        @s.rb_yield_indirected(1) { break 73 }.should == 73
+      end
     end
+
+    it "rb_yield to block passed to enumerator" do
+      enum_class = Class.new do
+        include Enumerable
+      end
+      @s.rb_yield_define_each(enum_class)
+      res = enum_class.new.collect { |i| i * 2}
+      res.should == [0, 2, 4, 6]
+    end
+
   end
 
   describe "rb_yield_values" do
@@ -258,7 +277,7 @@ describe "C-API Kernel function" do
       end.should raise_error(NameError)
       proof[0].should == 23
     end
-end
+  end
 
   describe "rb_rescue" do
     before :each do

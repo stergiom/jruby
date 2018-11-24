@@ -11,6 +11,7 @@ import org.jruby.ir.operands.TemporaryVariable;
 import org.jruby.ir.operands.Variable;
 import org.jruby.ir.representations.BasicBlock;
 import org.jruby.ir.representations.CFG;
+import org.jruby.runtime.Visibility;
 
 import java.util.ListIterator;
 
@@ -63,7 +64,13 @@ public class AddCallProtocolInstructions extends CompilerPass {
                 instrs.add(new PopBlockFrameInstr(savedFrame));
             }
         } else {
-            if (requireFrame) instrs.add(new PopMethodFrameInstr());
+            if (requireFrame) {
+                if (scope.needsOnlyBackref()) {
+                    instrs.add(new PopBackrefFrameInstr());
+                } else {
+                    instrs.add(new PopMethodFrameInstr());
+                }
+            }
         }
     }
 
@@ -118,14 +125,22 @@ public class AddCallProtocolInstructions extends CompilerPass {
                         if (arityValue == 1) {
                             prologueBB.addInstr(PrepareSingleBlockArgInstr.INSTANCE);
                         } else {
-                            prologueBB.addInstr(PrepareFixedBlockArgsInstr.INSTANCE);
+                            prologueBB.addInstr(PrepareBlockArgsInstr.INSTANCE);
                         }
                     } else {
                         prologueBB.addInstr(PrepareBlockArgsInstr.INSTANCE);
                     }
                 }
             } else {
-                if (requireFrame) entryBB.addInstr(new PushMethodFrameInstr(scope.getName()));
+                if (requireFrame) {
+                    if (scope.needsOnlyBackref()) {
+                        entryBB.addInstr(new PushBackrefFrameInstr());
+                    } else {
+                        entryBB.addInstr(new PushMethodFrameInstr(
+                                scope.getName(),
+                                scope.isScriptScope() ? Visibility.PRIVATE : Visibility.PUBLIC));
+                    }
+                }
                 if (requireBinding) entryBB.addInstr(new PushMethodBindingInstr());
             }
 

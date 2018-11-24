@@ -1,7 +1,18 @@
 package org.jruby.ir;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.EnumSet;
+
+import org.jruby.Ruby;
 import org.jruby.RubyInstanceConfig;
+import org.jruby.RubyModule;
+import org.jruby.RubySymbol;
+import org.jruby.ast.DefNode;
+import org.jruby.ast.IScopingNode;
+import org.jruby.ast.ModuleNode;
+import org.jruby.ast.Node;
+import org.jruby.ast.RootNode;
 import org.jruby.ir.instructions.LineNumberInstr;
 import org.jruby.ir.instructions.ReceiveSelfInstr;
 import org.jruby.ir.instructions.ToggleBacktraceInstr;
@@ -22,6 +33,12 @@ import org.jruby.ir.passes.DeadCodeElimination;
 import org.jruby.ir.passes.OptimizeDelegationPass;
 import org.jruby.ir.passes.OptimizeDynScopesPass;
 import org.jruby.ir.util.IGVInstrListener;
+import org.jruby.runtime.ThreadContext;
+import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
+import org.jruby.util.FileResource;
+import org.jruby.util.JRubyFile;
+import org.jruby.util.cli.Options;
 
 import static org.jruby.ir.IRFlags.RECEIVES_CLOSURE_ARG;
 import static org.jruby.ir.IRFlags.REQUIRES_DYNSCOPE;
@@ -31,13 +48,19 @@ public class IRManager {
     public static final String DEFAULT_BUILD_PASSES = "";
     public static final String DEFAULT_JIT_PASSES = "LocalOptimizationPass,DeadCodeElimination,OptimizeDynScopesPass,OptimizeDelegationPass,AddCallProtocolInstructions,AddMissingInitsPass";
     public static final String DEFAULT_INLINING_COMPILER_PASSES = "LocalOptimizationPass";
+    
+    public static boolean IR_INLINER = Options.IR_INLINER.load();
+    public static int IR_INLINER_THRESHOLD = Options.IR_INLINER_THRESHOLD.load();
+    public static boolean IR_INLINER_VERBOSE = Options.IR_INLINER_VERBOSE.load();
 
     private final CompilerPass deadCodeEliminationPass = new DeadCodeElimination();
     private final CompilerPass optimizeDynScopesPass = new OptimizeDynScopesPass();
     private final CompilerPass optimizeDelegationPass = new OptimizeDelegationPass();
 
+    private final static ByteList OBJECT = new ByteList(new byte[] {'O', 'b', 'j', 'e', 'c', 't'});
+
     private int dummyMetaClassCount = 0;
-    private final IRModuleBody object = new IRClassBody(this, null, "Object", 0, null);
+    private final IRModuleBody object;
     private final Nil nil = new Nil();
     private final Boolean tru = new Boolean(true);
     private final Boolean fals = new Boolean(false);
@@ -58,18 +81,25 @@ public class IRManager {
     private List<CompilerPass> jitPasses;
     private List<CompilerPass> safePasses;
     private final RubyInstanceConfig config;
+    public final Ruby runtime;
 
     // If true then code will not execute (see ir/ast tool)
     private boolean dryRun = false;
 
-    public IRManager(RubyInstanceConfig config) {
+    public IRManager(Ruby runtime, RubyInstanceConfig config) {
+        this.runtime = runtime;
         this.config = config;
+        object = new IRClassBody(this, null, runtime.newSymbol(OBJECT), 0, null);
         compilerPasses = CompilerPass.getPassesFromString(RubyInstanceConfig.IR_COMPILER_PASSES, DEFAULT_BUILD_PASSES);
         inliningCompilerPasses = CompilerPass.getPassesFromString(RubyInstanceConfig.IR_COMPILER_PASSES, DEFAULT_INLINING_COMPILER_PASSES);
         jitPasses = CompilerPass.getPassesFromString(RubyInstanceConfig.IR_JIT_PASSES, DEFAULT_JIT_PASSES);
         safePasses = CompilerPass.getPassesFromString(null, SAFE_COMPILER_PASSES);
 
         if (RubyInstanceConfig.IR_DEBUG_IGV != null) instrsListener = new IGVInstrListener();
+    }
+
+    public Ruby getRuntime() {
+        return runtime;
     }
 
     public boolean isDryRun() {
@@ -228,8 +258,8 @@ public class IRManager {
         if (irScopeListener.equals(listener)) irScopeListener = null;
     }
 
-    public String getMetaClassName() {
-        return "<DUMMY_MC:" + dummyMetaClassCount++ + ">";
+    public RubySymbol getMetaClassName() {
+        return runtime.newSymbol("<DUMMY_MC:" + dummyMetaClassCount++ + ">");
     }
 
     private TemporaryLocalVariable[] temporaryLocalVariables = new TemporaryLocalVariable[1600];
@@ -285,5 +315,40 @@ public class IRManager {
 
     public RubyInstanceConfig getInstanceConfig() {
         return config;
+    }
+
+    // FIXME: needs info for specialized method selection.
+    // FIXME: should allow non-classpath loading for easier debugging and hacking.
+    public IRMethod loadInternalMethod(ThreadContext context, IRubyObject self, String method) {
+        try {
+            RubyModule type = self.getMetaClass();
+            String fileName = "classpath:/jruby/ruby_implementations/" + type + "/" + method + ".rb";
+            FileResource file = JRubyFile.createResourceAsFile(context.runtime, fileName);
+            Node parseResult = parse(context, file, fileName);
+            IScopingNode scopeNode = (IScopingNode) parseResult.childNodes().get(0);
+            scopeNode.getScope().setModule(type);
+            DefNode defNode = (DefNode) scopeNode.getBodyNode();
+            IRScriptBody script = new IRScriptBody(this, runtime.newSymbol(parseResult.getFile()), ((RootNode) parseResult).getStaticScope());
+            IRModuleBody containingScope;
+            if (scopeNode instanceof ModuleNode) {
+                containingScope = new IRModuleBody(this, script, scopeNode.getCPath().getName(), 0, scopeNode.getScope());
+            } else {
+                containingScope = new IRClassBody(this, script, scopeNode.getCPath().getName(), 0, scopeNode.getScope());
+            }
+            IRMethod newMethod = new IRMethod(this, containingScope, defNode, context.runtime.newSymbol(method), true, 0, defNode.getScope(), false);
+
+            newMethod.prepareForCompilation();
+
+            return newMethod;
+        } catch (IOException e) {
+            e.printStackTrace(); // FIXME: More elegantly handle broken internal implementations
+            return null;
+        }
+    }
+
+    private Node parse(ThreadContext context, FileResource file, String fileName) throws IOException {
+        try (InputStream stream = file.openInputStream()) {
+            return context.runtime.parseFile(stream, fileName, null, 0);
+        }
     }
 }

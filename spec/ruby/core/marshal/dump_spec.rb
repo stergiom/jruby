@@ -1,6 +1,6 @@
 # -*- encoding: binary -*-
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/marshal_data', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/marshal_data'
 
 describe "Marshal.dump" do
   it "dumps nil" do
@@ -415,6 +415,15 @@ describe "Marshal.dump" do
       load = Marshal.load(dump)
       load.should == (1...2)
     end
+
+    it "dumps a Range with extra instance variables" do
+      range = (1...3)
+      range.instance_variable_set :@foo, 42
+      dump = Marshal.dump(range)
+      load = Marshal.load(dump)
+      load.should == range
+      load.instance_variable_get(:@foo).should == 42
+    end
   end
 
   describe "with a Time" do
@@ -530,6 +539,16 @@ describe "Marshal.dump" do
 
   end
 
+  describe "when passed a StringIO" do
+
+    it "should raise an error" do
+      require "stringio"
+
+      lambda { Marshal.dump(StringIO.new) }.should raise_error(TypeError)
+    end
+
+  end
+
   it "raises a TypeError if marshalling a Method instance" do
     lambda { Marshal.dump(Marshal.method(:dump)) }.should raise_error(TypeError)
   end
@@ -545,6 +564,11 @@ describe "Marshal.dump" do
 
   it "raises a TypeError if dumping a MatchData instance" do
     lambda { Marshal.dump(/(.)/.match("foo")) }.should raise_error(TypeError)
+  end
+
+  it "raises a TypeError if dumping a Mutex instance" do
+    m = Mutex.new
+    lambda { Marshal.dump(m) }.should raise_error(TypeError)
   end
 
   it "returns an untainted string if object is untainted" do

@@ -11,7 +11,7 @@ class TestTimeout < Test::Unit::TestCase
   def test_timeout_for_loop
     n = 10000000
     assert_raises(Timeout::Error) do
-      Timeout.timeout(1) { for i in 0..n do; (i + i % (i+1)) % (i + 10) ; end }
+      Timeout.timeout(0.1) { for i in 0..n do; (i + i % (i+1)) % (i + 10) ; end }
     end
   end
 
@@ -77,7 +77,7 @@ class TestTimeout < Test::Unit::TestCase
       http.start do |h|
         h.request_get '/index.html'
         # ensure we timeout even if we're fast
-        sleep(0.01)
+        sleep(1)
       end
     end
   end
@@ -112,44 +112,7 @@ class TestTimeout < Test::Unit::TestCase
         end
       end
     end
-    assert cls.new.timeout, "timeout should have returned 42"
-  end
-
-  # GH-312: Nested timeouts trigger inner for outer's timeout
-  def test_nested_timeout
-    result = []
-    expected = [
-      'Timeout 2: Non-timeout exception',
-      'Timeout 2: ensure',
-      'Timeout 1: triggered',
-      'Timeout 1: ensure'
-    ]
-
-    begin
-      Timeout.timeout(1) do
-	begin
-	  Timeout.timeout(2) do
-	    sleep(5)
-	  end
-	rescue Timeout::Error
-	  result << 'Timeout 2: triggered'
-          raise
-        rescue Exception
-          result << 'Timeout 2: Non-timeout exception'
-          raise
-	ensure
-	  result << 'Timeout 2: ensure'
-	end
-      end
-    rescue Timeout::Error
-      result << 'Timeout 1: triggered'
-    rescue Exception
-      result << 'Timeout 1: Non-timeout exception'
-    ensure
-      result << 'Timeout 1: ensure'
-    end
-
-    assert_equal expected, result
+    assert_equal 42, cls.new.timeout, "timeout should have returned 42"
   end
 
   class Seconds

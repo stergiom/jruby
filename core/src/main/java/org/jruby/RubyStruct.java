@@ -1,10 +1,10 @@
 /***** BEGIN LICENSE BLOCK *****
- * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ * Version: EPL 2.0/GPL 2.0/LGPL 2.1
  *
  * The contents of this file are subject to the Eclipse Public
- * License Version 1.0 (the "License"); you may not use this file
+ * License Version 2.0 (the "License"); you may not use this file
  * except in compliance with the License. You may obtain a copy of
- * the License at http://www.eclipse.org/legal/epl-v10.html
+ * the License at http://www.eclipse.org/legal/epl-v20.html
  *
  * Software distributed under the License is distributed on an "AS
  * IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
@@ -30,10 +30,15 @@
  * the provisions above, a recipient may use your version of this file under
  * the terms of any one of the EPL, the GPL or the LGPL.
  ***** END LICENSE BLOCK *****/
+
 package org.jruby;
+
+import java.util.Map;
+import java.util.Set;
 
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
+import org.jruby.ast.util.ArgsUtil;
 import org.jruby.common.IRubyWarnings.ID;
 import org.jruby.exceptions.RaiseException;
 import org.jruby.internal.runtime.methods.DynamicMethod;
@@ -64,6 +69,9 @@ public class RubyStruct extends RubyObject {
     public static final String NO_MEMBER_IN_STRUCT = "no member '%1$s' in struct";
     public static final String IDENTIFIER_NEEDS_TO_BE_CONSTANT = "identifier %1$s needs to be constant";
     public static final String UNINITIALIZED_CONSTANT = "uninitialized constant %1$s";
+    private static final String KEYWORD_INIT_VAR = "__keyword_init__";
+    private static final String SIZE_VAR = "__size__";
+    public static final String MEMBER_VAR = "__member__";
     private final IRubyObject[] values;
 
     /**
@@ -74,7 +82,7 @@ public class RubyStruct extends RubyObject {
     private RubyStruct(Ruby runtime, RubyClass rubyClass) {
         super(runtime, rubyClass);
 
-        int size = RubyNumeric.fix2int(getInternalVariable(rubyClass, "__size__"));
+        int size = RubyNumeric.fix2int(getInternalVariable(rubyClass, SIZE_VAR));
 
         values = new IRubyObject[size];
 
@@ -86,6 +94,7 @@ public class RubyStruct extends RubyObject {
         runtime.setStructClass(structClass);
         structClass.setClassIndex(ClassIndex.STRUCT);
         structClass.includeModule(runtime.getEnumerable());
+        structClass.setReifiedClass(RubyStruct.class);
         structClass.defineAnnotatedMethods(RubyStruct.class);
 
         return structClass;
@@ -112,7 +121,8 @@ public class RubyStruct extends RubyObject {
     }
 
     private RubyClass classOf() {
-        return getMetaClass() instanceof MetaClass ? getMetaClass().getSuperClass() : getMetaClass();
+        final RubyClass metaClass = getMetaClass();
+        return metaClass instanceof MetaClass ? metaClass.getSuperClass() : metaClass;
     }
 
     private void modify() {
@@ -128,7 +138,7 @@ public class RubyStruct extends RubyObject {
         IRubyObject[] values = this.values;
         for (int i = 0; i < values.length; i++) {
             h = (h << 1) | (h < 0 ? 1 : 0);
-            IRubyObject hash = context.safeRecurse(HASH_RECURSIVE, runtime, values[i], "hash", true);
+            IRubyObject hash = context.safeRecurse(HashRecursive.INSTANCE, runtime, values[i], "hash", true);
             h ^= RubyNumeric.num2long(hash);
         }
 
@@ -172,6 +182,7 @@ public class RubyStruct extends RubyObject {
     public static RubyClass newInstance(IRubyObject recv, IRubyObject[] args, Block block) {
         String name = null;
         boolean nilName = false;
+        boolean keywordInit = false;
         Ruby runtime = recv.getRuntime();
 
         if (args.length > 0) {
@@ -185,8 +196,26 @@ public class RubyStruct extends RubyObject {
 
         RubyArray member = runtime.newArray();
 
-        for (int i = (name == null && !nilName) ? 0 : 1; i < args.length; i++) {
-            member.append(runtime.newSymbol(args[i].asJavaString()));
+        int argc = args.length;
+        if (args[args.length - 1] instanceof RubyHash) {
+            argc--;
+            RubyHash kwArgs = args[args.length - 1].convertToHash();
+            IRubyObject[] rets = ArgsUtil.extractKeywordArgs(runtime.getCurrentContext(), kwArgs, "keyword_init");
+            keywordInit = rets[0].isTrue();
+        }
+
+        for (int i = (name == null && !nilName) ? 0 : 1; i < argc; i++) {
+            IRubyObject arg = args[i];
+            RubySymbol sym;
+            if (arg instanceof RubySymbol) {
+                sym = (RubySymbol) arg;
+            } else if (arg instanceof RubyString) {
+                sym = runtime.newSymbol(arg.convertToString().getByteList());
+            } else {
+                sym = runtime.newSymbol(arg.asJavaString());
+            }
+
+            member.append(sym);
         }
 
         RubyClass newStruct;
@@ -215,18 +244,21 @@ public class RubyStruct extends RubyObject {
         newStruct.setReifiedClass(RubyStruct.class);
         newStruct.setClassIndex(ClassIndex.STRUCT);
 
-        newStruct.setInternalVariable("__size__", member.length());
-        newStruct.setInternalVariable("__member__", member);
+        newStruct.setInternalVariable(SIZE_VAR, member.length());
+        newStruct.setInternalVariable(MEMBER_VAR, member);
+        newStruct.setInternalVariable(KEYWORD_INIT_VAR, keywordInit ? runtime.getTrue() : runtime.getFalse());
 
         newStruct.getSingletonClass().defineAnnotatedMethods(StructMethods.class);
 
         // define access methods.
         for (int i = (name == null && !nilName) ? 0 : 1; i < args.length; i++) {
+            if (i == args.length - 1 && args[i] instanceof RubyHash) break;
             final String memberName = args[i].asJavaString();
             // if we are storing a name as well, index is one too high for values
             final int index = (name == null && !nilName) ? i : i - 1;
-            newStruct.addMethod(memberName, new Accessor(newStruct, index));
-            newStruct.addMethod(memberName + '=', new Mutator(newStruct, index));
+            newStruct.addMethod(memberName, new Accessor(newStruct, memberName, index));
+            String nameAsgn = memberName + '=';
+            newStruct.addMethod(nameAsgn, new Mutator(newStruct, nameAsgn, index));
         }
 
         if (block.isGiven()) {
@@ -270,6 +302,13 @@ public class RubyStruct extends RubyObject {
         @JRubyMethod
         public static IRubyObject members(IRubyObject recv, Block block) {
             return RubyStruct.members19(recv, block);
+        }
+
+        @JRubyMethod
+        public static IRubyObject inspect(IRubyObject recv) {
+            IRubyObject keywordInit = RubyStruct.getInternalVariable((RubyClass)recv, KEYWORD_INIT_VAR);
+            if (!keywordInit.isTrue()) return recv.inspect();
+            return recv.inspect().convertToString().catString("(keyword_init: true)");
         }
     }
 
@@ -329,10 +368,33 @@ public class RubyStruct extends RubyObject {
         modify();
         checkSize(args.length);
 
-        System.arraycopy(args, 0, values, 0, args.length);
-        Helpers.fillNil(values, args.length, values.length, context.runtime);
+        IRubyObject keywordInit = RubyStruct.getInternalVariable(classOf(), KEYWORD_INIT_VAR);
+
+        if (keywordInit.isTrue()) {
+            if (args.length != 1) throw context.runtime.newArgumentError("wrong number of arguments (given " + args.length + ", expected 0)");
+
+            return initialize(context, args[0]);
+        } else {
+            System.arraycopy(args, 0, values, 0, args.length);
+            Helpers.fillNil(values, args.length, values.length, context.runtime);
+        }
 
         return context.nil;
+    }
+
+    private void setupStructValuesFromHash(ThreadContext context, RubyHash kwArgs) {
+        RubyArray __members__ = __member__();
+        Set<Map.Entry<IRubyObject, IRubyObject>> entries = kwArgs.directEntrySet();
+
+        entries.stream().forEach(
+                entry -> {
+                    IRubyObject key = entry.getKey();
+                    if (!(key instanceof RubySymbol))
+                        key = context.runtime.newSymbol(key.convertToString().getByteList());
+                    IRubyObject index = __members__.index(context, key);
+                    if (index.isNil()) throw context.runtime.newArgumentError("unknown keywords: " + key);
+                    values[index.convertToInteger().getIntValue()] = entry.getValue();
+                });
     }
 
     @JRubyMethod(visibility = PRIVATE)
@@ -344,17 +406,40 @@ public class RubyStruct extends RubyObject {
 
     @JRubyMethod(visibility = PRIVATE)
     public IRubyObject initialize(ThreadContext context, IRubyObject arg0) {
-        IRubyObject nil = context.nil;
-        return initializeInternal(context, 1, arg0, nil, nil);
+        Ruby runtime = context.runtime;
+
+        IRubyObject keywordInit = RubyStruct.getInternalVariable(classOf(), KEYWORD_INIT_VAR);
+        if (keywordInit.isTrue()) {
+            IRubyObject maybeKwargs = ArgsUtil.getOptionsArg(runtime, arg0);
+
+            if (maybeKwargs.isNil()) throw context.runtime.newArgumentError("wrong number of arguments (given 1, expected 0)");
+
+            setupStructValuesFromHash(context, (RubyHash) maybeKwargs);
+
+            return context.nil;
+        } else {
+            IRubyObject nil = context.nil;
+            return initializeInternal(context, 1, arg0, nil, nil);
+        }
     }
 
     @JRubyMethod(visibility = PRIVATE)
     public IRubyObject initialize(ThreadContext context, IRubyObject arg0, IRubyObject arg1) {
+        IRubyObject keywordInit = RubyStruct.getInternalVariable(classOf(), KEYWORD_INIT_VAR);
+        if (keywordInit.isTrue()) {
+            throw context.runtime.newArgumentError("wrong number of arguments (given 2, expected 0)");
+        }
+
         return initializeInternal(context, 2, arg0, arg1, context.nil);
     }
 
     @JRubyMethod(visibility = PRIVATE)
     public IRubyObject initialize(ThreadContext context, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
+        IRubyObject keywordInit = RubyStruct.getInternalVariable(classOf(), KEYWORD_INIT_VAR);
+        if (keywordInit.isTrue()) {
+            throw context.runtime.newArgumentError("wrong number of arguments (given 3, expected 0)");
+        }
+
         return initializeInternal(context, 3, arg0, arg1, arg2);
     }
 
@@ -377,23 +462,25 @@ public class RubyStruct extends RubyObject {
         return context.nil;
     }
 
-    // NOTE: no longer used ... should it get deleted?
-    public static RubyArray members(IRubyObject recv, Block block) {
-        final Ruby runtime = recv.getRuntime();
-
-        final RubyArray member = __member__((RubyClass) recv);
+    static RubyArray members(RubyClass type) {
+        final RubyArray member = __member__(type);
         final int len = member.getLength();
-        RubyArray result = RubyArray.newBlankArray(runtime, len);
+        IRubyObject[] result = new IRubyObject[len];
 
         for ( int i = 0; i < len; i++ ) {
-            result.store(i, member.eltInternal(i));
+            result[i] = member.eltInternal(i);
         }
 
-        return result;
+        return RubyArray.newArrayNoCopy(type.getClassRuntime(), result);
+    }
+
+    @Deprecated // NOTE: no longer used ... should it get deleted?
+    public static RubyArray members(IRubyObject recv, Block block) {
+        return members((RubyClass) recv);
     }
 
     private static RubyArray __member__(RubyClass clazz) {
-        RubyArray member = (RubyArray) getInternalVariable(clazz, "__member__");
+        RubyArray member = (RubyArray) getInternalVariable(clazz, MEMBER_VAR);
 
         assert !member.isNil() : "uninitialized struct";
 
@@ -404,13 +491,14 @@ public class RubyStruct extends RubyObject {
         return __member__(classOf());
     }
 
+    @JRubyMethod(name = "members")
     public RubyArray members() {
-        return members19();
+        return members(classOf());
     }
 
-    @JRubyMethod(name = "members")
-    public RubyArray members19() {
-        return members19(classOf(), Block.NULL_BLOCK);
+    @Deprecated
+    public final RubyArray members19() {
+        return members();
     }
 
     @JRubyMethod
@@ -472,7 +560,7 @@ public class RubyStruct extends RubyObject {
         if (other == this) return context.tru;
 
         // recursion guard
-        return context.safeRecurse(EQUAL_RECURSIVE, other, this, "==", true);
+        return context.safeRecurse(EqualRecursive.INSTANCE, other, this, "==", true);
     }
 
     @JRubyMethod(name = "eql?", required = 1)
@@ -486,7 +574,7 @@ public class RubyStruct extends RubyObject {
         if (other == this) return context.tru;
 
         // recursion guard
-        return context.safeRecurse(EQL_RECURSIVE, other, this, "eql?", true);
+        return context.safeRecurse(EqlRecursive.INSTANCE, other, this, "eql?", true);
     }
 
     private static final byte[] STRUCT_BEG = { '#','<','s','t','r','u','c','t',' ' };
@@ -519,8 +607,7 @@ public class RubyStruct extends RubyObject {
                 buffer.cat(' ');
             }
             RubySymbol slot = (RubySymbol) member.eltInternal(i);
-            String name = slot.toString();
-            if (IdUtil.isLocal(name) || IdUtil.isConstant(name)) {
+            if (slot.validLocalVariableName() || slot.validConstantName()) {
                 buffer.cat19(RubyString.objAsString(context, slot));
             } else {
                 buffer.cat19(((RubyString) slot.inspect(context)));
@@ -536,13 +623,13 @@ public class RubyStruct extends RubyObject {
     @JRubyMethod(name = {"inspect", "to_s"})
     public RubyString inspect(final ThreadContext context) {
         // recursion guard
-        return (RubyString) context.safeRecurse(INSPECT_RECURSIVE, this, this, "inspect", false);
+        return (RubyString) context.safeRecurse(InspectRecursive.INSTANCE, this, this, "inspect", false);
     }
 
     @JRubyMethod(name = {"to_a", "values"})
     @Override
     public RubyArray to_a() {
-        return RubyArray.newArrayMayCopy(getRuntime(), values);
+        return getRuntime().newArray(values);
     }
 
     @JRubyMethod
@@ -646,12 +733,11 @@ public class RubyStruct extends RubyObject {
         return values[newIdx] = value;
     }
 
-    // FIXME: This is copied code from RubyArray.  Both RE, Struct, and Array should share one impl
+    // NOTE: copied from RubyArray, both RE, Struct, and Array should share one impl
     @JRubyMethod(rest = true)
     public IRubyObject values_at(IRubyObject[] args) {
-        final Ruby runtime = getRuntime();
         final int olen = values.length;
-        RubyArray result = runtime.newArray(args.length);
+        RubyArray result = getRuntime().newArray(args.length);
 
         for (int i = 0; i < args.length; i++) {
             final IRubyObject arg = args[i];
@@ -660,15 +746,16 @@ public class RubyStruct extends RubyObject {
                 continue;
             }
 
-            final int[] beglen;
+            final int[] begLen;
             if ( ! ( arg instanceof RubyRange ) ) {
+                // do result.append
             }
-            else if ( ( beglen = ((RubyRange) args[i]).begLenInt(olen, 0) ) == null ) {
+            else if ( ( begLen = ((RubyRange) args[i]).begLenInt(olen, 0) ) == null ) {
                 continue;
             }
             else {
-                final int beg = beglen[0];
-                final int len = beglen[1];
+                final int beg = begLen[0];
+                final int len = begLen[1];
                 for (int j = 0; j < len; j++) {
                     result.append( aref(j + beg) );
                 }
@@ -762,11 +849,11 @@ public class RubyStruct extends RubyObject {
         return this;
     }
 
-    private static class Accessor extends DynamicMethod {
+    public static class Accessor extends DynamicMethod {
         private final int index;
 
-        public Accessor(RubyClass newStruct, int index) {
-            super(newStruct, Visibility.PUBLIC);
+        public Accessor(RubyClass newStruct, String name, int index) {
+            super(newStruct, Visibility.PUBLIC, name);
             this.index = index;
         }
 
@@ -783,15 +870,19 @@ public class RubyStruct extends RubyObject {
 
         @Override
         public DynamicMethod dup() {
-            return new Accessor((RubyClass) getImplementationClass(), index);
+            return new Accessor((RubyClass) getImplementationClass(), name, index);
+        }
+
+        public int getIndex() {
+            return index;
         }
     }
 
-    private static class Mutator extends DynamicMethod {
+    public static class Mutator extends DynamicMethod {
         private final int index;
 
-        public Mutator(RubyClass newStruct, int index) {
-            super(newStruct, Visibility.PUBLIC);
+        public Mutator(RubyClass newStruct, String name, int index) {
+            super(newStruct, Visibility.PUBLIC, name);
             this.index = index;
         }
 
@@ -808,7 +899,11 @@ public class RubyStruct extends RubyObject {
 
         @Override
         public DynamicMethod dup() {
-            return new Accessor((RubyClass) getImplementationClass(), index);
+            return new Mutator((RubyClass) getImplementationClass(), name, index);
+        }
+
+        public int getIndex() {
+            return index;
         }
     }
 
@@ -818,6 +913,9 @@ public class RubyStruct extends RubyObject {
     }
 
     private static class EqlRecursive implements ThreadContext.RecursiveFunctionEx<IRubyObject> {
+
+        static final EqlRecursive INSTANCE = new EqlRecursive();
+
         @Override
         public IRubyObject call(ThreadContext context, IRubyObject other, IRubyObject self, boolean recur) {
             if (recur) return context.tru;
@@ -831,9 +929,10 @@ public class RubyStruct extends RubyObject {
         }
     }
 
-    private static final EqlRecursive EQL_RECURSIVE = new EqlRecursive();
-
     private static class HashRecursive implements ThreadContext.RecursiveFunctionEx<Ruby> {
+
+        static final HashRecursive INSTANCE = new HashRecursive();
+
         @Override
         public IRubyObject call(ThreadContext context, Ruby runtime, IRubyObject obj, boolean recur) {
             if (recur) return RubyFixnum.zero(runtime);
@@ -841,9 +940,10 @@ public class RubyStruct extends RubyObject {
         }
     }
 
-    private static final HashRecursive HASH_RECURSIVE = new HashRecursive();
-
     private static class EqualRecursive implements ThreadContext.RecursiveFunctionEx<IRubyObject> {
+
+        private static final EqualRecursive INSTANCE = new EqualRecursive();
+
         @Override
         public IRubyObject call(ThreadContext context, IRubyObject other, IRubyObject self, boolean recur) {
             if (recur) return context.tru;
@@ -857,13 +957,13 @@ public class RubyStruct extends RubyObject {
         }
     }
 
-    private static final EqualRecursive EQUAL_RECURSIVE = new EqualRecursive();
-
     private static class InspectRecursive implements ThreadContext.RecursiveFunctionEx<RubyStruct> {
+
+        private static final ThreadContext.RecursiveFunctionEx INSTANCE = new InspectRecursive();
+
         public IRubyObject call(ThreadContext context, RubyStruct self, IRubyObject obj, boolean recur) {
             return self.inspectStruct(context, recur);
         }
     }
 
-    private static final ThreadContext.RecursiveFunctionEx INSPECT_RECURSIVE = new InspectRecursive();
 }

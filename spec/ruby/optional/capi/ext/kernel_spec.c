@@ -65,6 +65,12 @@ VALUE kernel_spec_rb_block_call_no_func(VALUE self, VALUE ary) {
 
 #endif
 
+#ifdef HAVE_RB_FRAME_THIS_FUNC
+VALUE kernel_spec_rb_frame_this_func(VALUE self) {
+  return ID2SYM(rb_frame_this_func());
+}
+#endif
+
 #ifdef HAVE_RB_ENSURE
 VALUE kernel_spec_rb_ensure(VALUE self, VALUE main_proc, VALUE arg,
                             VALUE ensure_proc, VALUE arg2) {
@@ -230,6 +236,19 @@ static VALUE kernel_spec_rb_yield(VALUE self, VALUE obj) {
   return rb_yield(obj);
 }
 
+static VALUE kernel_spec_rb_yield_each(int argc, VALUE *args, VALUE self) {
+  int i;
+  for(i = 0; i < 4; i++) {
+    rb_yield(INT2FIX(i));
+  }
+  return INT2FIX(4);
+}
+
+static VALUE kernel_spec_rb_yield_define_each(VALUE self, VALUE cls) {
+  rb_define_method(cls, "each", kernel_spec_rb_yield_each, -1);
+  return Qnil;
+}
+
 static int kernel_cb(const void *a, const void *b) {
   rb_yield(Qtrue);
   return 0;
@@ -337,6 +356,11 @@ void Init_kernel_spec(void) {
   rb_define_method(cls, "rb_block_proc", kernel_spec_rb_block_proc, 0);
 #endif
 
+#ifdef HAVE_RB_FRAME_THIS_FUNC
+  rb_define_method(cls, "rb_frame_this_func_test", kernel_spec_rb_frame_this_func, 0);
+  rb_define_method(cls, "rb_frame_this_func_test_again", kernel_spec_rb_frame_this_func, 0);
+#endif
+
 #ifdef HAVE_RB_ENSURE
   rb_define_method(cls, "rb_ensure", kernel_spec_rb_ensure, 4);
 #endif
@@ -392,6 +416,7 @@ void Init_kernel_spec(void) {
 #ifdef HAVE_RB_YIELD
   rb_define_method(cls, "rb_yield", kernel_spec_rb_yield, 1);
   rb_define_method(cls, "rb_yield_indirected", kernel_spec_rb_yield_indirected, 1);
+  rb_define_method(cls, "rb_yield_define_each", kernel_spec_rb_yield_define_each, 1);
 #endif
 
 #ifdef HAVE_RB_YIELD_VALUES

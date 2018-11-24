@@ -1,4 +1,4 @@
-require File.expand_path('../spec_helper', __FILE__)
+require_relative 'spec_helper'
 
 load_extension("object")
 
@@ -175,6 +175,7 @@ describe "CApiObject" do
   describe "rb_require" do
     before :each do
       @saved_loaded_features = $LOADED_FEATURES.dup
+      $foo = nil
     end
 
     after :each do
@@ -183,7 +184,6 @@ describe "CApiObject" do
     end
 
     it "requires a ruby file" do
-      $foo.should == nil
       $:.unshift File.dirname(__FILE__)
       @o.rb_require()
       $foo.should == 7
@@ -313,8 +313,8 @@ describe "CApiObject" do
 
     it "does not rescue exceptions raised by #to_ary" do
       obj = mock("to_ary")
-      obj.should_receive(:to_ary).and_raise(RuntimeError)
-      lambda { @o.rb_check_array_type obj }.should raise_error(RuntimeError)
+      obj.should_receive(:to_ary).and_raise(frozen_error_class)
+      lambda { @o.rb_check_array_type obj }.should raise_error(frozen_error_class)
     end
   end
 
@@ -404,6 +404,31 @@ describe "CApiObject" do
     end
   end
 
+  describe "FL_ABLE" do
+    it "returns correct boolean for type" do
+      @o.FL_ABLE(Object.new).should be_true
+      @o.FL_ABLE(true).should be_false
+      @o.FL_ABLE(nil).should be_false
+      @o.FL_ABLE(1).should be_false
+    end
+  end
+
+  describe "FL_TEST" do
+    it "returns correct status for FL_TAINT" do
+      obj = Object.new
+      @o.FL_TEST(obj, "FL_TAINT").should == 0
+      obj.taint
+      @o.FL_TEST(obj, "FL_TAINT").should_not == 0
+    end
+
+    it "returns correct status for FL_FREEZE" do
+      obj = Object.new
+      @o.FL_TEST(obj, "FL_FREEZE").should == 0
+      obj.freeze
+      @o.FL_TEST(obj, "FL_FREEZE").should_not == 0
+    end
+  end
+
   describe "rb_inspect" do
     it "returns a string with the inspect representation" do
       @o.rb_inspect(nil).should == "nil"
@@ -419,6 +444,13 @@ describe "CApiObject" do
       @o.rb_class_of(0).should == Fixnum
       @o.rb_class_of(0.1).should == Float
       @o.rb_class_of(ObjectTest.new).should == ObjectTest
+    end
+
+    it "returns the singleton class if it exists" do
+      o = ObjectTest.new
+      @o.rb_class_of(o).should equal ObjectTest
+      s = o.singleton_class
+      @o.rb_class_of(o).should equal s
     end
   end
 
@@ -634,14 +666,14 @@ describe "CApiObject" do
       obj.tainted?.should == true
     end
 
-    it "raises a RuntimeError if the object passed is frozen" do
-      lambda { @o.rb_obj_taint("".freeze) }.should raise_error(RuntimeError)
+    it "raises a #{frozen_error_class} if the object passed is frozen" do
+      lambda { @o.rb_obj_taint("".freeze) }.should raise_error(frozen_error_class)
     end
   end
 
   describe "rb_check_frozen" do
-    it "raises a RuntimeError if the obj is frozen" do
-      lambda { @o.rb_check_frozen("".freeze) }.should raise_error(RuntimeError)
+    it "raises a #{frozen_error_class} if the obj is frozen" do
+      lambda { @o.rb_check_frozen("".freeze) }.should raise_error(frozen_error_class)
     end
 
     it "does nothing when object isn't frozen" do
@@ -781,12 +813,30 @@ describe "CApiObject" do
       it "returns nil if the instance variable has not been initialized" do
         @o.rb_ivar_get(@test, :@bar).should == nil
       end
+
+      it "returns nil if the instance variable has not been initialized and is not a valid Ruby name" do
+        @o.rb_ivar_get(@test, :bar).should == nil
+      end
+
+      it 'returns the instance variable when it is not a valid Ruby name' do
+        @o.rb_ivar_set(@test, :foo, 27)
+        @o.rb_ivar_get(@test, :foo).should == 27
+      end
     end
 
     describe "rb_ivar_set" do
       it "sets and returns the instance variable on an object" do
         @o.rb_ivar_set(@test, :@foo, 42).should == 42
         @test.instance_eval { @foo }.should == 42
+      end
+
+      it "sets and returns the instance variable on an object" do
+        @o.rb_ivar_set(@test, :@foo, 42).should == 42
+        @test.instance_eval { @foo }.should == 42
+      end
+
+      it 'sets and returns the instance variable when it is not a valid Ruby name' do
+        @o.rb_ivar_set(@test, :foo, 27).should == 27
       end
     end
 
@@ -797,6 +847,10 @@ describe "CApiObject" do
 
       it "returns false if the instance variable is not defined" do
         @o.rb_ivar_defined(@test, :@bar).should == false
+      end
+
+      it "does not throw an error if the instance variable is not a valid Ruby name" do
+        @o.rb_ivar_defined(@test, :bar).should == false
       end
     end
   end

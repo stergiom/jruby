@@ -24,6 +24,11 @@ describe :time_params, shared: true do
       Time.send(@method, 2000, 2, 3, 4, 5, 0)
   end
 
+  it "accepts a too big day of the month by going to the next month" do
+    Time.send(@method, 1999, 2, 31).should ==
+      Time.send(@method, 1999, 3, 3)
+  end
+
   it "raises a TypeError if the year is nil" do
     lambda { Time.send(@method, nil) }.should raise_error(TypeError)
   end
@@ -111,10 +116,8 @@ describe :time_params, shared: true do
   end
 
   it "interprets all numerals as base 10" do
-    Time.send(@method, "2000", "08", "08", "08", "08", "08").should ==
-      Time.send(@method, 2000, 8, 8, 8, 8, 8)
-    Time.send(@method, "2000", "09", "09", "09", "09", "09").should ==
-      Time.send(@method, 2000, 9, 9, 9, 9, 9)
+    Time.send(@method, "2000", "08", "08", "08", "08", "08").should == Time.send(@method, 2000, 8, 8, 8, 8, 8)
+    Time.send(@method, "2000", "09", "09", "09", "09", "09").should == Time.send(@method, 2000, 9, 9, 9, 9, 9)
   end
 
   it "handles fractional seconds as a Float" do
@@ -225,6 +228,10 @@ describe :time_params_microseconds, shared: true do
   it "handles microseconds" do
     t = Time.send(@method, 2000, 1, 1, 20, 15, 1, 123)
     t.usec.should == 123
+  end
+
+  it "raises an ArgumentError for out of range microsecond" do
+    lambda { Time.send(@method, 2000, 1, 1, 20, 15, 1, 1000000) }.should raise_error(ArgumentError)
   end
 
   it "handles fractional microseconds as a Float" do

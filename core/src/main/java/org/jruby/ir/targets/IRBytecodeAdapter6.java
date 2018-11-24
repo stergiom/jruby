@@ -28,6 +28,8 @@ import org.jruby.RubySymbol;
 import org.jruby.compiler.NotCompilableException;
 import org.jruby.compiler.impl.SkinnyMethodAdapter;
 import org.jruby.ir.IRScope;
+import org.jruby.ir.instructions.CallBase;
+import org.jruby.ir.instructions.EQQInstr;
 import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.parser.StaticScope;
 import org.jruby.runtime.Block;
@@ -354,14 +356,13 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         });
     }
 
-    public void pushSymbolProc(final String name, final Encoding encoding) {
+    public void pushSymbolProc(final String id) {
         cacheValuePermanentlyLoadContext("symbolProc", RubyProc.class, null, new Runnable() {
             @Override
             public void run() {
                 loadContext();
-                adapter.ldc(name);
-                adapter.ldc(encoding.toString());
-                invokeIRHelper("newSymbolProc", sig(RubyProc.class, ThreadContext.class, String.class, String.class));
+                adapter.ldc(id);
+                invokeIRHelper("newSymbolProc", sig(RubyProc.class, ThreadContext.class, String.class));
             }
         });
     }
@@ -382,17 +383,16 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         });
     }
 
-    public void invokeOther(String file, int line, String name, int arity, boolean hasClosure, boolean isPotentiallyRefined) {
-        invoke(file, line, name, arity, hasClosure, CallType.NORMAL, isPotentiallyRefined);
+    @Override
+    public void invokeOther(String file, int line, String scopeFieldName, CallBase call, int arity) {
+        invoke(file, line, scopeFieldName, call, arity);
     }
 
-    public void invokeArrayDeref(String file, int line) {
-        SkinnyMethodAdapter adapter2;
+    @Override
+    public void invokeArrayDeref(String file, int line, CallBase call) {
         String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, RubyString.class));
-
-        String methodName = getUniqueSiteName("[]");
-
-        adapter2 = new SkinnyMethodAdapter(
+        String methodName = getUniqueSiteName(call.getId());
+        SkinnyMethodAdapter adapter2 = new SkinnyMethodAdapter(
                 adapter.getClassVisitor(),
                 Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
                 methodName,
@@ -401,7 +401,7 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
                 null);
 
         adapter2.aloadMany(0, 1, 2, 3);
-        cacheCallSite(adapter2, getClassData().clsName, methodName, "[]", CallType.FUNCTIONAL, false);
+        cacheCallSite(adapter2, getClassData().clsName, methodName, call.getId(), call);
         adapter2.invokestatic(p(IRRuntimeHelpers.class), "callOptimizedAref", sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, IRubyObject.class, RubyString.class, CallSite.class));
         adapter2.areturn();
         adapter2.end();
@@ -410,14 +410,17 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         adapter.invokestatic(getClassData().clsName, methodName, incomingSig);
     }
 
-    public void invoke(String file, int lineNumber, String name, int arity, boolean hasClosure, CallType callType, boolean isPotentiallyRefined) {
-        if (arity > MAX_ARGUMENTS) throw new NotCompilableException("call to `" + name + "' has more than " + MAX_ARGUMENTS + " arguments");
+    public void invoke(String file, int lineNumber, String scopeFieldName, CallBase call, int arity) {
+        String id = call.getId();
+        if (arity > MAX_ARGUMENTS) throw new NotCompilableException("call to `" + id + "' has more than " + MAX_ARGUMENTS + " arguments");
 
         SkinnyMethodAdapter adapter2;
         String incomingSig;
         String outgoingSig;
 
-        if (hasClosure) {
+        BlockPassType blockPassType = BlockPassType.fromIR(call);
+        boolean blockGiven = blockPassType.given();
+        if (blockGiven) {
             switch (arity) {
                 case -1:
                     incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, JVM.OBJECT_ARRAY, Block.class));
@@ -455,7 +458,7 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
             }
         }
 
-        String methodName = getUniqueSiteName(name);
+        String methodName = getUniqueSiteName(id);
 
         adapter2 = new SkinnyMethodAdapter(
                 adapter.getClassVisitor(),
@@ -467,7 +470,7 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
 
         adapter2.line(lineNumber);
 
-        cacheCallSite(adapter2, getClassData().clsName, methodName, name, callType, isPotentiallyRefined);
+        cacheCallSite(adapter2, getClassData().clsName, methodName, scopeFieldName, call);
 
         // use call site to invoke
         adapter2.aload(0); // context
@@ -478,29 +481,29 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
             case -1:
             case 1:
                 adapter2.aload(3);
-                if (hasClosure) adapter2.aload(4);
+                if (blockGiven) adapter2.aload(4);
                 break;
             case 0:
-                if (hasClosure) adapter2.aload(3);
+                if (blockGiven) adapter2.aload(3);
                 break;
             case 2:
                 adapter2.aload(3);
                 adapter2.aload(4);
-                if (hasClosure) adapter2.aload(5);
+                if (blockGiven) adapter2.aload(5);
                 break;
             case 3:
                 adapter2.aload(3);
                 adapter2.aload(4);
                 adapter2.aload(5);
-                if (hasClosure) adapter2.aload(6);
+                if (blockGiven) adapter2.aload(6);
                 break;
             default:
                 buildArrayFromLocals(adapter2, 3, arity);
-                if (hasClosure) adapter2.aload(3 + arity);
+                if (blockGiven) adapter2.aload(3 + arity);
                 break;
         }
 
-        adapter2.invokevirtual(p(CachingCallSite.class), "call", outgoingSig);
+        adapter2.invokevirtual(p(CachingCallSite.class), blockPassType.literal() ? "callIter" : "call", outgoingSig);
         adapter2.areturn();
         adapter2.end();
 
@@ -529,13 +532,15 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         }
     }
 
-    public void invokeOtherOneFixnum(String file, int line, String name, long fixnum, CallType callType) {
-        if (!MethodIndex.hasFastFixnumOps(name)) {
+    @Override
+    public void invokeOtherOneFixnum(String file, int line, CallBase call, long fixnum) {
+        String id = call.getId();
+        if (!MethodIndex.hasFastFixnumOps(id)) {
             pushFixnum(fixnum);
-            if (callType == CallType.NORMAL) {
-                invokeOther(file, line, name, 1, false, false);
+            if (call.getCallType() == CallType.NORMAL) {
+                invokeOther(file, line, null, call, 1);
             } else {
-                invokeSelf(file, line, name, 1, false, callType, false);
+                invokeSelf(file, line, null, call, 1);
             }
             return;
         }
@@ -544,7 +549,7 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT));
         String outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, long.class));
 
-        String methodName = "invokeOtherOneFixnum" + getClassData().callSiteCount.getAndIncrement() + ":" + JavaNameMangler.mangleMethodName(name);
+        String methodName = "invokeOtherOneFixnum" + getClassData().callSiteCount.getAndIncrement() + ":" + JavaNameMangler.mangleMethodName(id);
 
         adapter2 = new SkinnyMethodAdapter(
                 adapter.getClassVisitor(),
@@ -565,7 +570,7 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         Label doCall = new Label();
         adapter2.ifnonnull(doCall);
         adapter2.pop();
-        adapter2.ldc(name);
+        adapter2.ldc(id);
         adapter2.invokestatic(p(MethodIndex.class), "getFastFixnumOpsCallSite", sig(CallSite.class, String.class));
         adapter2.dup();
         adapter2.putstatic(getClassData().clsName, methodName, ci(CallSite.class));
@@ -585,13 +590,15 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         adapter.invokestatic(getClassData().clsName, methodName, incomingSig);
     }
 
-    public void invokeOtherOneFloat(String file, int line, String name, double flote, CallType callType) {
-        if (!MethodIndex.hasFastFloatOps(name)) {
+    @Override
+    public void invokeOtherOneFloat(String file, int line, CallBase call, double flote) {
+        String id = call.getId();
+        if (!MethodIndex.hasFastFloatOps(id)) {
             pushFloat(flote);
-            if (callType == CallType.NORMAL) {
-                invokeOther(file, line, name, 1, false, false);
+            if (call.getCallType() == CallType.NORMAL) {
+                invokeOther(file, line, null, call, 1);
             } else {
-                invokeSelf(file, line, name, 1, false, callType, false);
+                invokeSelf(file, line, null, call, 1);
             }
             return;
         }
@@ -600,7 +607,7 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         String incomingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT));
         String outgoingSig = sig(JVM.OBJECT, params(ThreadContext.class, JVM.OBJECT, JVM.OBJECT, double.class));
 
-        String methodName = "invokeOtherOneFloat" + getClassData().callSiteCount.getAndIncrement() + ':' + JavaNameMangler.mangleMethodName(name);
+        String methodName = "invokeOtherOneFloat" + getClassData().callSiteCount.getAndIncrement() + ':' + JavaNameMangler.mangleMethodName(id);
 
         adapter2 = new SkinnyMethodAdapter(
                 adapter.getClassVisitor(),
@@ -621,7 +628,7 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         Label doCall = new Label();
         adapter2.ifnonnull(doCall);
         adapter2.pop();
-        adapter2.ldc(name);
+        adapter2.ldc(id);
         adapter2.invokestatic(p(MethodIndex.class), "getFastFloatOpsCallSite", sig(CallSite.class, String.class));
         adapter2.dup();
         adapter2.putstatic(getClassData().clsName, methodName, ci(CallSite.class));
@@ -641,10 +648,10 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         adapter.invokestatic(getClassData().clsName, methodName, incomingSig);
     }
 
-    public void invokeSelf(String file, int line, String name, int arity, boolean hasClosure, CallType callType, boolean isPotentiallyRefined) {
-        if (arity > MAX_ARGUMENTS) throw new NotCompilableException("call to `" + name + "' has more than " + MAX_ARGUMENTS + " arguments");
+    public void invokeSelf(String file, int line, String scopeFieldName, CallBase call, int arity) {
+        if (arity > MAX_ARGUMENTS) throw new NotCompilableException("call to `" + call.getId() + "' has more than " + MAX_ARGUMENTS + " arguments");
 
-        invoke(file, line, name, arity, hasClosure, callType, isPotentiallyRefined);
+        invoke(file, line, scopeFieldName, call, arity);
     }
 
     public void invokeInstanceSuper(String file, int line, String name, int arity, boolean hasClosure, boolean[] splatmap) {
@@ -740,19 +747,19 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
     }
 
     public void searchConst(String name, boolean noPrivateConsts) {
-        adapter.invokedynamic("searchConst", sig(JVM.OBJECT, params(ThreadContext.class, StaticScope.class)), ConstantLookupSite.BOOTSTRAP, name, noPrivateConsts ? 1 : 0);
+        adapter.invokedynamic("searchConst", sig(JVM.OBJECT, params(ThreadContext.class, StaticScope.class)), ConstantLookupSite.BOOTSTRAP, name, noPrivateConsts ? 1 : 0, 1);
     }
 
-    public void searchModuleForConst(String name, boolean noPrivateConsts) {
-        adapter.invokedynamic("searchModuleForConst", sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class)), ConstantLookupSite.BOOTSTRAP, name, noPrivateConsts ? 1 : 0);
+    public void searchModuleForConst(String name, boolean noPrivateConsts, boolean callConstMissing) {
+        adapter.invokedynamic("searchModuleForConst", sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class)), ConstantLookupSite.BOOTSTRAP, name, noPrivateConsts ? 1 : 0, callConstMissing ? 1 : 0);
     }
 
     public void inheritanceSearchConst(String name, boolean noPrivateConsts) {
-        adapter.invokedynamic("inheritanceSearchConst", sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class)), ConstantLookupSite.BOOTSTRAP, name, noPrivateConsts ? 1 : 0);
+        adapter.invokedynamic("inheritanceSearchConst", sig(JVM.OBJECT, params(ThreadContext.class, IRubyObject.class)), ConstantLookupSite.BOOTSTRAP, name, noPrivateConsts ? 1 : 0, 1);
     }
 
     public void lexicalSearchConst(String name) {
-        adapter.invokedynamic("lexicalSearchConst", sig(JVM.OBJECT, params(ThreadContext.class, StaticScope.class)), ConstantLookupSite.BOOTSTRAP, name, 0);
+        adapter.invokedynamic("lexicalSearchConst", sig(JVM.OBJECT, params(ThreadContext.class, StaticScope.class)), ConstantLookupSite.BOOTSTRAP, name, 0, 1);
     }
 
     public void pushNil() {
@@ -1013,6 +1020,13 @@ public class IRBytecodeAdapter6 extends IRBytecodeAdapter{
         adapter.label(done);
 
         invokeIRHelper("prepareBlock", sig(Block.class, ThreadContext.class, IRubyObject.class, DynamicScope.class, BlockBody.class));
+    }
+
+    @Override
+    public void callEqq(EQQInstr call) {
+        IRBytecodeAdapter.cacheCallSite(adapter, getClassData().clsName, getUniqueSiteName(call.getId()), null, call);
+        adapter.ldc(call.isSplattedValue());
+        invokeIRHelper("isEQQ", sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, IRubyObject.class, CallSite.class, boolean.class));
     }
 
     private final Map<Object, String> cacheFieldNames = new HashMap<>();

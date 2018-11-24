@@ -32,32 +32,43 @@ module KernelSpecs
   end
 
   def self.has_private_method(name)
-    cmd = %[| #{ruby_cmd(nil)} -n -e "print Kernel.private_method_defined?('#{name}')"]
-    ruby_exe("puts", args: cmd) == "true"
+    IO.popen([*ruby_exe, "-n", "-e", "print Kernel.private_method_defined?(#{name.inspect})"], "r+") do |io|
+      io.puts
+      io.close_write
+      io.read
+    end == "true"
   end
 
   def self.chop(str, method)
-    cmd = "| #{ruby_cmd(nil)} -n -e '$_ = #{str.inspect}; #{method}; print $_'"
-    ruby_exe "puts", args: cmd
-  end
-
-  def self.encoded_chop(file)
-    ruby_exe "puts", args: "| #{ruby_cmd(nil)} -n #{file}"
+    IO.popen([*ruby_exe, "-n", "-e", "$_ = #{str.inspect}; #{method}; print $_"], "r+") do |io|
+      io.puts
+      io.close_write
+      io.read
+    end
   end
 
   def self.chomp(str, method, sep="\n")
-    cmd = "| #{ruby_cmd(nil)} -n -e '$_ = #{str.inspect}; $/ = #{sep.inspect}; #{method}; print $_'"
-    ruby_exe "puts", args: cmd
+    code = "$_ = #{str.inspect}; $/ = #{sep.inspect}; #{method}; print $_"
+    IO.popen([*ruby_exe, "-n", "-e", code], "r+") do |io|
+      io.puts
+      io.close_write
+      io.read
+    end
   end
 
-  def self.encoded_chomp(file)
-    ruby_exe "puts", args: "| #{ruby_cmd(nil)} -n #{file}"
+  def self.run_with_dash_n(file)
+    IO.popen([*ruby_exe, "-n", file], "r+") do |io|
+      io.puts
+      io.close_write
+      io.read
+    end
   end
 
   # kind_of?, is_a?, instance_of?
   module SomeOtherModule; end
   module AncestorModule; end
   module MyModule; end
+  module MyPrependedModule; end
   module MyExtensionModule; end
 
   class AncestorClass < String
@@ -70,6 +81,8 @@ module KernelSpecs
 
   class KindaClass < AncestorClass
     include MyModule
+    prepend MyPrependedModule
+
     def initialize
       self.extend MyExtensionModule
     end
@@ -209,22 +222,6 @@ module KernelSpecs
     class << self
       define_method(:defined_block) do
         block_given?
-      end
-    end
-  end
-
-  module KernelBlockGiven
-    def self.accept_block
-      Kernel.block_given?
-    end
-
-    def self.accept_block_as_argument(&block)
-      Kernel.block_given?
-    end
-
-    class << self
-      define_method(:defined_block) do
-        Kernel.block_given?
       end
     end
   end
@@ -383,6 +380,49 @@ module KernelSpecs
     def to_a
       [3, 4]
     end
+  end
+
+  module AutoloadMethod
+    def setup_autoload(file)
+      autoload :AutoloadFromIncludedModule, file
+    end
+  end
+
+  class AutoloadMethodIncluder
+    include AutoloadMethod
+  end
+
+  module AutoloadMethod2
+    def setup_autoload(file)
+      Kernel.autoload :AutoloadFromIncludedModule2, file
+    end
+  end
+
+  class AutoloadMethodIncluder2
+    include AutoloadMethod2
+  end
+
+  class WarnInNestedCall
+    def f4(s = "", n)
+      f3(s, n)
+    end
+
+    def f3(s, n)
+      f2(s, n)
+    end
+
+    def f2(s, n)
+      f1(s, n)
+    end
+
+    def f1(s, n)
+      warn(s, uplevel: n)
+    end
+
+    def warn_call_lineno; method(:f1).source_location[1] + 1; end
+    def f1_call_lineno; method(:f2).source_location[1] + 1; end
+    def f2_call_lineno; method(:f3).source_location[1] + 1; end
+    def f3_call_lineno; method(:f4).source_location[1] + 1; end
   end
 end
 

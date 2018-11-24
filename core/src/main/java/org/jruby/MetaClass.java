@@ -1,10 +1,10 @@
 /***** BEGIN LICENSE BLOCK *****
- * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ * Version: EPL 2.0/GPL 2.0/LGPL 2.1
  *
  * The contents of this file are subject to the Eclipse Public
- * License Version 1.0 (the "License"); you may not use this file
+ * License Version 2.0 (the "License"); you may not use this file
  * except in compliance with the License. You may obtain a copy of
- * the License at http://www.eclipse.org/legal/epl-v10.html
+ * the License at http://www.eclipse.org/legal/epl-v20.html
  *
  * Software distributed under the License is distributed on an "AS
  * IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
@@ -27,18 +27,32 @@
  * the provisions above, a recipient may use your version of this file under
  * the terms of any one of the EPL, the GPL or the LGPL.
  ***** END LICENSE BLOCK *****/
+
 package org.jruby;
 
 import org.jruby.runtime.builtin.IRubyObject;
 
 public final class MetaClass extends RubyClass {
-    /** rb_class_boot (for MetaClasses) (in makeMetaClass(RubyClass))
-     * 
-     */
+
+    @Deprecated
     public MetaClass(Ruby runtime, RubyClass superClass, IRubyObject attached) {
+        this(runtime, superClass, (RubyBasicObject) attached);
+    }
+
+    /**
+     * rb_class_boot for meta classes ({@link #makeMetaClass(RubyClass)})
+     */
+    MetaClass(Ruby runtime, RubyClass superClass, RubyBasicObject attached) {
         super(runtime, superClass, false);
         this.attached = attached;
-        setClassIndex(superClass.getClassIndex()); // use same ClassIndex as metaclass, since we're technically still of that type
+        // use same ClassIndex as metaclass, since we're technically still of that type
+        setClassIndex(superClass.getClassIndex());
+        superClass.addSubclass(this);
+    }
+
+    @Override
+    public final IRubyObject allocate(){
+        throw runtime.newTypeError("can't create instance of virtual class");
     }
 
     @Override
@@ -46,17 +60,48 @@ public final class MetaClass extends RubyClass {
         return true;
     }
 
-    public final IRubyObject allocate(){
-        throw runtime.newTypeError("can't create instance of virtual class");
+    /**
+     * rb_make_metaclass
+     * @param superClass
+     * @return singleton-class for this (singleton) class
+     */
+    @Override
+    public RubyClass makeMetaClass(RubyClass superClass) {
+        MetaClass klass = new MetaClass(runtime, getSuperSingletonMetaClass(), this);
+        setMetaClass(klass);
+
+        // Foo.singleton_class.singleton_class: #<Class:#<Class:Foo>>
+        // #<Class:#<Class:Foo>>'s singleton_class == #<Class:#<Class:Foo>>
+        klass.setMetaClass(klass);
+
+        return klass;
     }
 
-    public IRubyObject getAttached() {
+    private RubyClass getSuperSingletonMetaClass() {
+        if (attached instanceof RubyClass) {
+            RubyClass superClass = ((RubyClass) attached).getSuperClass();
+            if (superClass != null) superClass = superClass.getRealClass();
+            // #<Class:BasicObject>'s singleton class == Class.singleton_class
+            if (superClass == null) return runtime.getClassClass().getSingletonClass();
+            return superClass.getMetaClass().getSingletonClass();
+        }
+
+        return getSuperClass().getRealClass().getMetaClass(); // NOTE: is this correct?
+    }
+
+    @Override
+    RubyClass toSingletonClass(RubyBasicObject target) {
+        return attached == target ? this : super.toSingletonClass(target);
+    }
+
+    public RubyBasicObject getAttached() {
         return attached;
     }
 
-    public void setAttached(IRubyObject attached) {
+    public void setAttached(RubyBasicObject attached) {
         this.attached = attached;
     }
 
-    private IRubyObject attached = null;
+    private RubyBasicObject attached;
+
 }

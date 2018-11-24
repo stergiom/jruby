@@ -1,5 +1,5 @@
-require File.expand_path('../../../../../spec_helper', __FILE__)
-require File.expand_path('../../../fixtures/classes', __FILE__)
+require_relative '../../spec_helper'
+require_relative '../../fixtures/classes'
 
 describe :tcpsocket_new, shared: true do
   it "requires a hostname and a port as arguments" do
@@ -44,8 +44,14 @@ describe :tcpsocket_new, shared: true do
     end
 
     it "connects to a server when passed local_host and local_port arguments" do
+      server = TCPServer.new(SocketSpecs.hostname, 0)
+      begin
+        available_port = server.addr[1]
+      ensure
+        server.close
+      end
       @socket = TCPSocket.send(@method, @hostname, @server.port,
-                               @hostname, SocketSpecs.local_port)
+                               @hostname, available_port)
       @socket.should be_an_instance_of(TCPSocket)
     end
 
@@ -66,7 +72,7 @@ describe :tcpsocket_new, shared: true do
         @socket.addr[3].should == SocketSpecs.addr(:ipv6)
       end
 
-      @socket.addr[1].should be_kind_of(Fixnum)
+      @socket.addr[1].should be_kind_of(Integer)
       @socket.addr[2].should =~ /^#{@hostname}/
     end
   end

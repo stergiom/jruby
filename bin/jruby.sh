@@ -26,9 +26,9 @@ progname=`basename "$0"`
 
 while [ -h "$PRG" ] ; do
   ls=`ls -ld "$PRG"`
-  link=`expr "$ls" : '.*-> \(.*\)$'`
-  if expr "$link" : '.*/.*' > /dev/null; then
-    if expr "$link" : '/' > /dev/null; then
+  link=`expr -- "$ls" : '.*-> \(.*\)$'`
+  if expr -- "$link" : '.*/.*' > /dev/null; then
+    if expr -- "$link" : '/' > /dev/null; then
       PRG="$link"
     else
       PRG="`dirname ${PRG}`/${link}"
@@ -202,7 +202,7 @@ do
      # Match -Xa.b.c=d to translate to -Da.b.c=d as a java option
      -X*)
      val=${1:2}
-     if expr "$val" : '.*[.]' > /dev/null; then
+     if expr -- "$val" : '.*[.]' > /dev/null; then
        java_args="${java_args} -Djruby.${val}"
      else
        ruby_args="${ruby_args} -X${val}"
@@ -226,7 +226,8 @@ do
         else
           JAVACMD="$JAVA_HOME/bin/jdb"
         fi 
-        java_args="${java_args} -sourcepath $JRUBY_HOME/lib/ruby/1.9:."
+        JDB_SOURCEPATH="${JRUBY_HOME}/core/src/main/java:${JRUBY_HOME}/lib/ruby/stdlib:."
+        java_args="${java_args} -sourcepath ${JDB_SOURCEPATH}"
         JRUBY_OPTS="${JRUBY_OPTS} -X+C" ;;
      --client)
         JAVA_VM=-client ;;

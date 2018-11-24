@@ -1,6 +1,7 @@
 package org.jruby.ir.instructions;
 
 import org.jruby.RubyInstanceConfig;
+import org.jruby.RubySymbol;
 import org.jruby.ir.IRFlags;
 import org.jruby.ir.IRScope;
 import org.jruby.ir.IRVisitor;
@@ -16,31 +17,34 @@ import org.jruby.runtime.CallType;
 import org.jruby.runtime.DynamicScope;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.ByteList;
 
 public class UnresolvedSuperInstr extends CallInstr {
-    public static final String UNKNOWN_SUPER_TARGET  = "-unknown-super-target-";
+    public static final ByteList UNKNOWN_SUPER_TARGET =
+            new ByteList(new byte[] {'-', 'u', 'n', 'k', 'n', 'o', 'w', 'n', '-', 's', 'u', 'p', 'e', 'r', '-', 't', 'a', 'r', 'g', 'e', 't', '-'});
 
     // SSS FIXME: receiver is never used -- being passed in only to meet requirements of CallInstr
-    public UnresolvedSuperInstr(Operation op, Variable result, Operand receiver, Operand[] args, Operand closure,
+    public UnresolvedSuperInstr(IRScope scope, Operation op, Variable result, Operand receiver, Operand[] args, Operand closure,
                                 boolean isPotentiallyRefined) {
-        super(op, CallType.SUPER, result, UNKNOWN_SUPER_TARGET, receiver, args, closure, isPotentiallyRefined);
+        super(scope, op, CallType.SUPER, result, scope.getManager().getRuntime().newSymbol(UNKNOWN_SUPER_TARGET), receiver, args, closure, isPotentiallyRefined);
     }
 
-    public UnresolvedSuperInstr(Variable result, Operand receiver, Operand[] args, Operand closure,
+    public UnresolvedSuperInstr(IRScope scope, Variable result, Operand receiver, Operand[] args, Operand closure,
                                 boolean isPotentiallyRefined) {
-        this(Operation.UNRESOLVED_SUPER, result, receiver, args, closure, isPotentiallyRefined);
+        this(scope, Operation.UNRESOLVED_SUPER, result, receiver, args, closure, isPotentiallyRefined);
     }
 
     @Override
     public boolean computeScopeFlags(IRScope scope) {
         super.computeScopeFlags(scope);
-        scope.getFlags().add(IRFlags.REQUIRES_FRAME); // for current class and method name
+        scope.getFlags().add(IRFlags.REQUIRES_CLASS); // for current class and method name
+        scope.getFlags().add(IRFlags.REQUIRES_METHODNAME); // for current class and method name
         return true;
     }
 
     @Override
     public Instr clone(CloneInfo ii) {
-        return new UnresolvedSuperInstr(ii.getRenamedVariable(getResult()), getReceiver().cloneForInlining(ii),
+        return new UnresolvedSuperInstr(ii.getScope(), ii.getRenamedVariable(getResult()), getReceiver().cloneForInlining(ii),
                 cloneCallArgs(ii), getClosureArg() == null ? null : getClosureArg().cloneForInlining(ii), isPotentiallyRefined());
     }
 
@@ -49,7 +53,7 @@ public class UnresolvedSuperInstr extends CallInstr {
         int callTypeOrdinal = d.decodeInt();
         CallType callType = CallType.fromOrdinal(callTypeOrdinal);
         if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println("decoding call, calltype(ord):  " + callType);
-        String methAddr = d.decodeString();
+        RubySymbol methAddr = d.decodeSymbol();
         if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println("decoding call, methaddr:  " + methAddr);
         Operand receiver = d.decodeOperand();
         int argsCount = d.decodeInt();
@@ -66,14 +70,16 @@ public class UnresolvedSuperInstr extends CallInstr {
         Operand closure = hasClosureArg ? d.decodeOperand() : null;
         if (RubyInstanceConfig.IR_READING_DEBUG) System.out.println("before result");
 
-        return new UnresolvedSuperInstr(d.decodeVariable(), receiver, args, closure, d.getCurrentScope().maybeUsingRefinements());
+        return new UnresolvedSuperInstr(d.getCurrentScope(), d.decodeVariable(), receiver, args, closure, d.getCurrentScope().maybeUsingRefinements());
     }
 
+    /*
     // We cannot convert this into a NoCallResultInstr
     @Override
     public Instr discardResult() {
         return this;
     }
+    */
 
     @Override
     public Object interpret(ThreadContext context, StaticScope currScope, DynamicScope currDynScope, IRubyObject self, Object[] temp) {

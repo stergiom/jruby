@@ -1,11 +1,11 @@
 /*
  ***** BEGIN LICENSE BLOCK *****
- * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ * Version: EPL 2.0/GPL 2.0/LGPL 2.1
  *
  * The contents of this file are subject to the Eclipse Public
- * License Version 1.0 (the "License"); you may not use this file
+ * License Version 2.0 (the "License"); you may not use this file
  * except in compliance with the License. You may obtain a copy of
- * the License at http://www.eclipse.org/legal/epl-v10.html
+ * the License at http://www.eclipse.org/legal/epl-v20.html
  *
  * Software distributed under the License is distributed on an "AS
  * IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
@@ -24,14 +24,17 @@
  * the provisions above, a recipient may use your version of this file under
  * the terms of any one of the EPL, the GPL or the LGPL.
  ***** END LICENSE BLOCK *****/
+
 package org.jruby.runtime.ivars;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.lang.invoke.MethodHandle;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+
 import org.jruby.Ruby;
 import org.jruby.RubyBasicObject;
 import org.jruby.RubyClass;
@@ -67,7 +70,13 @@ public class VariableTableManager {
     private volatile String[] variableNames = EMPTY_STRING_ARRAY;
 
     /** whether a slot has been allocated to object_id */
-    private volatile boolean hasObjectID = false;
+    private volatile int hasObjectID = 0;
+
+    /** whether a slot has been allocated to ffi */
+    private volatile int hasFFI = 0;
+
+    /** whether a slot has been allocated to objectspace_group */
+    private volatile int hasObjectspaceGroup = 0;
 
     /** whether objects associated with this table use fields */
     private volatile int fieldVariables = 0;
@@ -103,7 +112,7 @@ public class VariableTableManager {
      * @return true if object_id has been allocated; false otherwise
      */
     public boolean hasObjectID() {
-        return hasObjectID;
+        return hasObjectID == 1;
     }
 
     /**
@@ -114,16 +123,17 @@ public class VariableTableManager {
      * @return the object's object_id (possibly new)
      */
     public long getObjectId(RubyBasicObject self) {
-        VariableAccessor objectIdAccessor = getObjectIdAccessorField().getVariableAccessorForRead();
+        VariableAccessor objectIdAccessor = getObjectIdAccessorForRead();
         Long id = (Long)objectIdAccessor.get(self);
         if (id != null) return id;
 
         synchronized (self) {
-            objectIdAccessor = getObjectIdAccessorField().getVariableAccessorForRead();
+            objectIdAccessor = getObjectIdAccessorForRead();
             id = (Long)objectIdAccessor.get(self);
             if (id != null) return id;
 
-            return initObjectId(self, getObjectIdAccessorField().getVariableAccessorForWrite(this));
+            objectIdAccessor = getObjectIdAccessorForWrite();
+            return initObjectId(self, objectIdAccessor);
         }
     }
 
@@ -188,7 +198,7 @@ public class VariableTableManager {
         return ivarAccessor;
     }
 
-    public VariableAccessor getVariableAccessorForVar(String name, int index) {
+    public VariableAccessor getVariableAccessorForVar(String name, MethodHandle getter, MethodHandle setter) {
         VariableAccessor ivarAccessor = variableAccessors.get(name);
         if (ivarAccessor == null) {
 
@@ -198,7 +208,7 @@ public class VariableTableManager {
 
                 if (ivarAccessor == null) {
                     // allocate a new accessor and populate a new table
-                    ivarAccessor = allocateVariableAccessorForVar(name, index);
+                    ivarAccessor = allocateVariableAccessorForVar(name, getter, setter);
                     Map<String, VariableAccessor> newVariableAccessors = new HashMap<String, VariableAccessor>(myVariableAccessors.size() + 1);
 
                     newVariableAccessors.putAll(myVariableAccessors);
@@ -225,25 +235,28 @@ public class VariableTableManager {
     }
 
     /**
-     * Retrieve the lazy accessor (VariableAccessorField) for object_id.
+     * Retrieve the read accessor for object_id for reads. If no object_id has been prepared, this will return a dummy
+     * accessor that just returns null.
      *
-     * @return the lazy accessor for object_id
+     * @return the read accessor for object_id
      */
-    public VariableAccessorField getObjectIdAccessorField() {
-        return objectIdVariableAccessorField;
+    public VariableAccessor getObjectIdAccessorForRead() {
+        return objectIdVariableAccessorField.getVariableAccessorForRead();
     }
 
     /**
-     * Retrieve the lazy accessor (VariableAccessorField) for FFI handle.
+     * Retrieve the write accessor for object_id.
      *
-     * @return the lazy accessor for FFI handle
+     * @return the write accessor for object_id
      */
-    public VariableAccessorField getFFIHandleAccessorField() {
-        return ffiHandleVariableAccessorField;
+    public VariableAccessor getObjectIdAccessorForWrite() {
+        if (hasObjectID == 0) hasObjectID = 1;
+        return objectIdVariableAccessorField.getVariableAccessorForWrite(this);
     }
 
     /**
-     * Retrieve the read accessor for FFI handle.
+     * Retrieve the read accessor for FFI handle. If no object_id has been prepared, this will return a dummy
+     * accessor that just returns null.
      *
      * @return the read accessor for FFI handle
      */
@@ -257,20 +270,13 @@ public class VariableTableManager {
      * @return the write accessor for FFI handle
      */
     public VariableAccessor getFFIHandleAccessorForWrite() {
+        if (hasFFI == 0) hasFFI = 1;
         return ffiHandleVariableAccessorField.getVariableAccessorForWrite(this);
     }
 
     /**
-     * Retrieve the lazy accessor (VariableAccessorField) for object group.
-     *
-     * @return the lazy accessor for object group
-     */
-    public VariableAccessorField getObjectGroupAccessorField() {
-        return objectGroupVariableAccessorField;
-    }
-
-    /**
-     * Retrieve the read accessor for object group.
+     * Retrieve the read accessor for object group. If no object_id has been prepared, this will return a dummy
+     * accessor that just returns null.
      *
      * @return the read accessor for object group
      */
@@ -284,6 +290,7 @@ public class VariableTableManager {
      * @return the write accessor for object group
      */
     public VariableAccessor getObjectGroupAccessorForWrite() {
+        if (hasObjectspaceGroup == 0) hasObjectspaceGroup = 1;
         return objectGroupVariableAccessorField.getVariableAccessorForWrite(this);
     }
 
@@ -421,7 +428,8 @@ public class VariableTableManager {
     public boolean hasVariables(RubyBasicObject object) {
         // we check both to exclude object_id
         Object[] myVarTable;
-        return fieldVariables > 0 || getVariableTableSize() > 0 && (myVarTable = object.varTable) != null && myVarTable.length > 0;
+        return fieldVariables > 0 ||
+                (myVarTable = object.varTable) != null && myVarTable.length > hasObjectID + hasFFI + hasObjectspaceGroup;
     }
 
     public void serializeVariables(RubyBasicObject object, ObjectOutputStream oos) throws IOException {
@@ -566,7 +574,7 @@ public class VariableTableManager {
         return newVariableAccessor;
     }
 
-    synchronized final VariableAccessor allocateVariableAccessorForVar(String name, int index) {
+    synchronized final VariableAccessor allocateVariableAccessorForVar(String name, MethodHandle getter, MethodHandle setter) {
         int id = realClass.id;
 
         final String[] myVariableNames = variableNames;
@@ -574,41 +582,7 @@ public class VariableTableManager {
 
         fieldVariables += 1;
 
-        VariableAccessor newVariableAccessor;
-        switch (index) {
-            case 0:
-                newVariableAccessor = new VariableAccessorVar0(realClass, name, newIndex, id);
-                break;
-            case 1:
-                newVariableAccessor = new VariableAccessorVar1(realClass, name, newIndex, id);
-                break;
-            case 2:
-                newVariableAccessor = new VariableAccessorVar2(realClass, name, newIndex, id);
-                break;
-            case 3:
-                newVariableAccessor = new VariableAccessorVar3(realClass, name, newIndex, id);
-                break;
-            case 4:
-                newVariableAccessor = new VariableAccessorVar4(realClass, name, newIndex, id);
-                break;
-            case 5:
-                newVariableAccessor = new VariableAccessorVar5(realClass, name, newIndex, id);
-                break;
-            case 6:
-                newVariableAccessor = new VariableAccessorVar6(realClass, name, newIndex, id);
-                break;
-            case 7:
-                newVariableAccessor = new VariableAccessorVar7(realClass, name, newIndex, id);
-                break;
-            case 8:
-                newVariableAccessor = new VariableAccessorVar8(realClass, name, newIndex, id);
-                break;
-            case 9:
-                newVariableAccessor = new VariableAccessorVar9(realClass, name, newIndex, id);
-                break;
-            default:
-                throw new RuntimeException("unsupported var index in " + realClass + ": " + index);
-        }
+        VariableAccessor newVariableAccessor = new FieldVariableAccessor(realClass, name, newIndex, id, getter, setter);
 
         final String[] newVariableNames = new String[newIndex + 1];
         ArraySupport.copy(myVariableNames, 0, newVariableNames, 0, newIndex);
@@ -616,5 +590,35 @@ public class VariableTableManager {
         variableNames = newVariableNames;
 
         return newVariableAccessor;
+    }
+
+    /**
+     * Retrieve the lazy accessor (VariableAccessorField) for object_id.
+     *
+     * @return the lazy accessor for object_id
+     * @deprecated Use {@link #getObjectIdAccessorForRead()} or {@link #getObjectIdAccessorForWrite()}
+     */
+    public VariableAccessorField getObjectIdAccessorField() {
+        return objectIdVariableAccessorField;
+    }
+
+    /**
+     * Retrieve the lazy accessor (VariableAccessorField) for FFI handle.
+     *
+     * @return the lazy accessor for FFI handle
+     * @deprecated Use {@link #getFFIHandleAccessorForRead()} or {@link #getFFIHandleAccessorForWrite()}
+     */
+    public VariableAccessorField getFFIHandleAccessorField() {
+        return ffiHandleVariableAccessorField;
+    }
+
+    /**
+     * Retrieve the lazy accessor (VariableAccessorField) for object group.
+     *
+     * @return the lazy accessor for object group
+     * @deprecated Use {@link #getObjectGroupAccessorForRead()} or {@link #getObjectGroupAccessorForWrite()}
+     */
+    public VariableAccessorField getObjectGroupAccessorField() {
+        return objectGroupVariableAccessorField;
     }
 }

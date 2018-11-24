@@ -13,10 +13,12 @@ import org.jruby.ir.dataflow.DataFlowProblem;
 import org.jruby.ir.instructions.Instr;
 import org.jruby.ir.instructions.LabelInstr;
 import org.jruby.ir.instructions.ReceiveSelfInstr;
+import org.jruby.ir.instructions.Site;
 import org.jruby.ir.passes.CompilerPass;
 import org.jruby.ir.representations.BasicBlock;
 import org.jruby.ir.representations.CFG;
 import org.jruby.ir.representations.CFGLinearizer;
+import org.jruby.ir.transformations.inlining.SimpleCloneInfo;
 
 /**
  * Created by enebo on 2/27/15.
@@ -28,16 +30,19 @@ public class FullInterpreterContext extends InterpreterContext {
     // FIXME: At some point when we relinearize after running another phase of passes we should document that here to know how this field is changed
     private BasicBlock[] linearizedBBList = null;
 
-    // Contains pairs of values.  The first value is number of instrs in this range + number of instrs before
-    // this range.  The second number is the rescuePC.  getRescuePC(ipc) will walk this list and first odd value
-    // less than this value will be the rpc.
-    private int[] rescueIPCs = null;
-
     /** Map of name -> dataflow problem */
     private Map<String, DataFlowProblem> dataFlowProblems;
 
     /** What passes have been run on this scope? */
     private List<CompilerPass> executedPasses = new ArrayList<>();
+
+    // For duplicate()
+    public FullInterpreterContext(IRScope scope, CFG cfg, BasicBlock[] linearizedBBList) {
+        super(scope, (List<Instr>) null);
+
+        this.cfg = cfg;
+        this.linearizedBBList = linearizedBBList;
+    }
 
     // FIXME: Perhaps abstract IC into interface of base class so we do not have a null instructions field here
     public FullInterpreterContext(IRScope scope, Instr[] instructions) {
@@ -145,7 +150,7 @@ public class FullInterpreterContext extends InterpreterContext {
         instructions = linearizedInstrArray;
         temporaryVariablecount = getScope().getTemporaryVariablesCount();
 
-        // System.out.println("SCOPE: " + getScope().getName());
+        // System.out.println("SCOPE: " + getScope().getId());
         // System.out.println("INSTRS: " + cfg.toStringInstrs());
     }
 
@@ -182,12 +187,53 @@ public class FullInterpreterContext extends InterpreterContext {
         return "\nCFG:\n" + cfg.toStringGraph() + "\nInstructions:\n" + cfg.toStringInstrs();
     }
 
+    public String toStringLinearized() {
+        StringBuilder buf = new StringBuilder();
+
+        for (BasicBlock bb: getLinearizedBBList()) {
+            buf.append(bb + bb.toStringInstrs());
+        }
+
+        return buf.toString();
+    }
+
+    public FullInterpreterContext duplicate() {
+        try {
+            CFG newCFG = cfg.clone(new SimpleCloneInfo(getScope(), false, true), getScope());
+            BasicBlock[] newLinearizedBBList = new BasicBlock[linearizedBBList.length];
+
+            for (int i = 0; i < linearizedBBList.length; i++) {
+                newLinearizedBBList[i] = newCFG.getBBForLabel(linearizedBBList[i].getLabel());
+            }
+
+            return new FullInterpreterContext(getScope(), newCFG, newLinearizedBBList);
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return null;
+        }
+    }
+
+
     public int determineRPC(int ipc) {
         int length = rescueIPCs.length;
         for (int i = 0; i + 1 < length; i += 2) {
             if (ipc <= rescueIPCs[i]) return rescueIPCs[i + 1];
         }
 
-        throw new RuntimeException("BUG: no RPC found for " + getFileName() + ":" + getName() + ":" + ipc + getInstructions());
+        throw new RuntimeException("BUG: no RPC found for " + getFileName() + ":" + getName() + ":" + ipc);
+    }
+
+    public BasicBlock findBasicBlockOf(long callsiteId) {
+        for (BasicBlock basicBlock: linearizeBasicBlocks()) {
+            for (Instr instr: basicBlock.getInstrs()) {
+                if (instr instanceof Site) {
+                    Site site = (Site) instr;
+
+                    if (site.getCallSiteId() == callsiteId) return basicBlock;
+                }
+            }
+        }
+
+        throw new RuntimeException("Bug: Looking for callsiteId: " + callsiteId + " in " + this);
     }
 }

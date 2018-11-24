@@ -1,11 +1,11 @@
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/classes', __FILE__)
-require File.expand_path('../shared/exit', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/classes'
+require_relative 'shared/exit'
 
 describe "Thread#terminate" do
-  it_behaves_like :thread_exit, :terminate
-end
-
-describe "Thread#terminate!" do
-  it "needs to be reviewed for spec completeness"
+  # This spec randomly kills mspec worker like: https://ci.appveyor.com/project/ruby/ruby/builds/19390874/job/wv1bsm8skd4e1pxl
+  # TODO: Investigate the cause or at least print helpful logs, and remove this `platform_is_not` guard.
+  platform_is_not :mingw do
+    it_behaves_like :thread_exit, :terminate
+  end
 end

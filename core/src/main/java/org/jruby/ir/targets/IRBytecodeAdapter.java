@@ -9,8 +9,16 @@ import org.jcodings.Encoding;
 import org.jruby.Ruby;
 import org.jruby.RubyClass;
 import org.jruby.compiler.impl.SkinnyMethodAdapter;
+import org.jruby.ir.IRManager;
+import org.jruby.ir.IRScope;
+import org.jruby.ir.instructions.CallBase;
+import org.jruby.ir.instructions.ClosureAcceptingInstr;
+import org.jruby.ir.instructions.EQQInstr;
+import org.jruby.ir.operands.Operand;
 import org.jruby.ir.operands.UndefinedValue;
 import org.jruby.ir.runtime.IRRuntimeHelpers;
+import org.jruby.runtime.Binding;
+import org.jruby.runtime.Block;
 import org.jruby.runtime.CallType;
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.ThreadContext;
@@ -18,6 +26,7 @@ import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.runtime.callsite.CachingCallSite;
 import org.jruby.runtime.callsite.FunctionalCachingCallSite;
 import org.jruby.runtime.callsite.NormalCachingCallSite;
+import org.jruby.runtime.callsite.ProfilingCachingCallSite;
 import org.jruby.runtime.callsite.RefinedCachingCallSite;
 import org.jruby.runtime.callsite.VariableCachingCallSite;
 import org.jruby.util.ByteList;
@@ -54,11 +63,9 @@ public abstract class IRBytecodeAdapter {
      * @param method the SkinnyMethodAdapter to that's generating the containing method body
      * @param className the name of the class in which the field will reside
      * @param siteName the unique name of the site, used for the field
-     * @param rubyName the Ruby method name being invoked
-     * @param callType the type of call
-     * @param isPotentiallyRefined whether the call might be refined
+     * @param call of we are making a callsite for.
      */
-    public static void cacheCallSite(SkinnyMethodAdapter method, String className, String siteName, String rubyName, CallType callType, boolean isPotentiallyRefined) {
+    public static void cacheCallSite(SkinnyMethodAdapter method, String className, String siteName, String scopeFieldName, CallBase call) {
         // call site object field
         method.getClassVisitor().visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, siteName, ci(CachingCallSite.class), null, null).visitEnd();
 
@@ -68,17 +75,26 @@ public abstract class IRBytecodeAdapter {
         Label doCall = new Label();
         method.ifnonnull(doCall);
         method.pop();
-        method.ldc(rubyName);
+        method.ldc(call.getId());
+
+        CallType callType = call.getCallType();
         Class<? extends CachingCallSite> siteClass;
         String signature;
-        if (isPotentiallyRefined) {
+        boolean profileCandidate = call.hasLiteralClosure() && scopeFieldName != null;
+        boolean profiled = false;
+        if (call.isPotentiallyRefined()) {
             siteClass = RefinedCachingCallSite.class;
             signature = sig(siteClass, String.class, String.class);
             method.ldc(callType.name());
         } else {
             switch (callType) {
                 case NORMAL:
-                    siteClass = NormalCachingCallSite.class;
+                    if (profileCandidate && IRManager.IR_INLINER) {
+                        profiled = true;
+                        siteClass = ProfilingCachingCallSite.class;
+                    } else {
+                        siteClass = NormalCachingCallSite.class;
+                    }
                     break;
                 case FUNCTIONAL:
                     siteClass = FunctionalCachingCallSite.class;
@@ -89,7 +105,13 @@ public abstract class IRBytecodeAdapter {
                 default:
                     throw new RuntimeException("BUG: Unexpected call type " + callType + " in JVM6 invoke logic");
             }
-            signature = sig(siteClass, String.class);
+            if (profiled) {
+                method.getstatic(className, scopeFieldName, ci(IRScope.class));
+                method.ldc(call.getCallSiteId());
+                signature = sig(siteClass, String.class, IRScope.class, long.class);
+            } else {
+                signature = sig(siteClass, String.class);
+            }
         }
         method.invokestatic(p(IRRuntimeHelpers.class), "new" + siteClass.getSimpleName(), signature);
         method.dup();
@@ -131,7 +153,12 @@ public abstract class IRBytecodeAdapter {
     }
 
     public void loadSelfBlock() {
-        adapter.aload(signature.argOffset(JVMVisitor.SELF_BLOCK_NAME));
+        int selfBlockOffset = signature.argOffset(JVMVisitor.SELF_BLOCK_NAME);
+        if (selfBlockOffset == -1) {
+            adapter.aconst_null();
+        } else {
+            adapter.aload(selfBlockOffset);
+        }
     }
 
     public void loadStaticScope() {
@@ -156,19 +183,15 @@ public abstract class IRBytecodeAdapter {
     }
 
     public void loadFrameName() {
-        // when present, should be second-to-last element in signature
-        adapter.aload(signature.argCount() - 1);
-    }
+        int superNameOffset = signature.argOffset(JVMVisitor.SUPER_NAME_NAME);
 
-    public void loadSuperName() {
-        adapter.aload(5);
-    }
-
-    public void loadBlockType() {
-        if (signature.argOffset("type") == -1) {
-            adapter.aconst_null();
+        if (superNameOffset == -1) {
+            // load from self block
+            loadSelfBlock();
+            adapter.invokevirtual(p(Block.class), "getBinding", sig(Binding.class));
+            adapter.invokevirtual(p(Binding.class), "getMethod", sig(String.class));
         } else {
-            adapter.aload(signature.argOffset("type"));
+            adapter.aload(superNameOffset);
         }
     }
 
@@ -208,12 +231,19 @@ public abstract class IRBytecodeAdapter {
         adapter.go_to(label);
     }
 
-    public void isTrue() {
+    public void branchIfTruthy(Label target) {
         adapter.invokeinterface(p(IRubyObject.class), "isTrue", sig(boolean.class));
+        btrue(target);
     }
 
-    public void isNil() {
-        adapter.invokeinterface(p(IRubyObject.class), "isNil", sig(boolean.class));
+    /**
+     * Branch to label if value at top of stack is nil
+     *
+     * stack: obj to check for nilness
+     */
+    public void branchIfNil(Label label) {
+        pushNil();
+        adapter.if_acmpeq(label);
     }
 
     public void bfalse(org.objectweb.asm.Label label) {
@@ -333,10 +363,9 @@ public abstract class IRBytecodeAdapter {
      *
      * Stack required: none
      *
-     * @param name the symbol's string identifier
-     * @param encoding the symbol's encoding
+     * @param id raw id string for the symbol.
      */
-    public abstract void pushSymbolProc(String name, Encoding encoding);
+    public abstract void pushSymbolProc(String id);
 
         /**
          * Push the JRuby runtime on the stack.
@@ -359,11 +388,9 @@ public abstract class IRBytecodeAdapter {
      *
      * Stack required: context, self, all arguments, optional block
      *
-     * @param name name of the method to invoke
-     * @param arity arity of the call
-     * @param hasClosure whether a closure will be on the stack for passing
+     * @param call the call to be invoked
      */
-    public abstract void invokeOther(String file, int line, String name, int arity, boolean hasClosure, boolean isPotentiallyRefined);
+    public abstract void invokeOther(String file, int line, String scopeFieldName, CallBase call, int arity);
 
     /**
      * Invoke the array dereferencing method ([]) on an object other than self.
@@ -374,26 +401,48 @@ public abstract class IRBytecodeAdapter {
      * @param file
      * @param line
      */
-    public abstract void invokeArrayDeref(String file, int line);
+    public abstract void invokeArrayDeref(String file, int line, CallBase call);
 
     /**
      * Invoke a fixnum-receiving method on an object other than self.
      *
      * Stack required: context, self, receiver (fixnum will be handled separately)
      *
-     * @param name name of the method to invoke
      */
-    public abstract void invokeOtherOneFixnum(String file, int line, String name, long fixnum, CallType callType);
+    public abstract void invokeOtherOneFixnum(String file, int line, CallBase call, long fixnum);
 
     /**
      * Invoke a float-receiving method on an object other than self.
      *
      * Stack required: context, self, receiver (float will be handled separately)
      *
-     * @param name name of the method to invoke
      */
-    public abstract void invokeOtherOneFloat(String file, int line, String name, double flote, CallType callType);
+    public abstract void invokeOtherOneFloat(String file, int line, CallBase call, double flote);
 
+    public enum BlockPassType {
+        NONE(false, false),
+        GIVEN(true, false),
+        LITERAL(true, true);
+
+        private final boolean given;
+        private final boolean literal;
+
+        BlockPassType(boolean given, boolean literal) {
+            this.given = given;
+            this.literal = literal;
+        }
+
+        public boolean given() {
+            return given;
+        }
+        public boolean literal() {
+            return literal;
+        }
+        public static BlockPassType fromIR(ClosureAcceptingInstr callInstr) {
+            Operand closure = callInstr.getClosureArg();
+            return closure != null ? ( callInstr.hasLiteralClosure() ? BlockPassType.LITERAL : BlockPassType.GIVEN) : BlockPassType.NONE;
+        }
+    }
 
     /**
      * Invoke a method on self.
@@ -402,12 +451,10 @@ public abstract class IRBytecodeAdapter {
      *
      * @param file the filename of the script making this call
      * @param line the line number where this call appears
-     * @param name name of the method to invoke
-     * @param arity arity of the call
-     * @param hasClosure whether a closure will be on the stack for passing
-     * @param callType
+     * @param call to be invoked on self
+     * @param arity of the call.
      */
-    public abstract void invokeSelf(String file, int line, String name, int arity, boolean hasClosure, CallType callType, boolean isPotentiallyRefined);
+    public abstract void invokeSelf(String file, int line, String scopeFieldName, CallBase call, int arity);
 
     /**
      * Invoke a superclass method from an instance context.
@@ -484,7 +531,7 @@ public abstract class IRBytecodeAdapter {
      * @param name name of the constant
      * @param noPrivateConsts whether to ignore private constants
      */
-    public abstract void searchModuleForConst(String name, boolean noPrivateConsts);
+    public abstract void searchModuleForConst(String name, boolean noPrivateConsts, boolean callConstMissing);
 
     /**
      * Lookup a constant from a given class or module.
@@ -625,6 +672,13 @@ public abstract class IRBytecodeAdapter {
      * Stack required: context, self, dynamicScope
      */
     public abstract void prepareBlock(Handle handle, org.jruby.runtime.Signature signature, String className);
+
+    /**
+     * Perform a === call appropriate for a case/when statement.
+     *
+     * Stack required: context, case value, when value
+     */
+    public abstract void callEqq(EQQInstr call);
 
     public SkinnyMethodAdapter adapter;
     private int variableCount = 0;

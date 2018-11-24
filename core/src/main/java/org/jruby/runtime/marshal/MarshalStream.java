@@ -1,11 +1,11 @@
 /*
  ***** BEGIN LICENSE BLOCK *****
- * Version: EPL 1.0/GPL 2.0/LGPL 2.1
+ * Version: EPL 2.0/GPL 2.0/LGPL 2.1
  *
  * The contents of this file are subject to the Eclipse Public
- * License Version 1.0 (the "License"); you may not use this file
+ * License Version 2.0 (the "License"); you may not use this file
  * except in compliance with the License. You may obtain a copy of
- * the License at http://www.eclipse.org/legal/epl-v10.html
+ * the License at http://www.eclipse.org/legal/epl-v20.html
  *
  * Software distributed under the License is distributed on an "AS
  * IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
@@ -32,6 +32,7 @@
  * the provisions above, a recipient may use your version of this file under
  * the terms of any one of the EPL, the GPL or the LGPL.
  ***** END LICENSE BLOCK *****/
+
 package org.jruby.runtime.marshal;
 
 import java.io.FilterOutputStream;
@@ -47,6 +48,7 @@ import org.jruby.RubyBasicObject;
 import org.jruby.RubyBignum;
 import org.jruby.RubyBoolean;
 import org.jruby.RubyClass;
+import org.jruby.RubyEncoding;
 import org.jruby.RubyFixnum;
 import org.jruby.RubyFloat;
 import org.jruby.RubyHash;
@@ -63,6 +65,9 @@ import org.jruby.runtime.builtin.Variable;
 import org.jruby.util.ByteList;
 import org.jruby.internal.runtime.methods.DynamicMethod;
 import org.jruby.runtime.encoding.MarshalEncoding;
+
+import static org.jruby.util.RubyStringBuilder.str;
+import static org.jruby.util.RubyStringBuilder.types;
 
 /**
  * Marshals objects into Ruby's binary marshal format.
@@ -98,18 +103,14 @@ public class MarshalStream extends FilterOutputStream {
     public void dumpObject(IRubyObject value) throws IOException {
         depth++;
         
-        if (depth > depthLimit) {
-            throw runtime.newArgumentError("exceed depth limit");
-        }
+        if (depth > depthLimit) throw runtime.newArgumentError("exceed depth limit");
 
         tainted |= value.isTaint();
 
         writeAndRegister(value);
 
         depth--;
-        if (depth == 0) {
-            out.flush(); // flush afer whole dump is complete
-        }
+        if (depth == 0) out.flush(); // flush afer whole dump is complete
     }
 
     public void registerLinkTarget(IRubyObject newObject) {
@@ -118,7 +119,7 @@ public class MarshalStream extends FilterOutputStream {
         }
     }
 
-    public void registerSymbol(String sym) {
+    public void registerSymbol(ByteList sym) {
         cache.registerSymbol(sym);
     }
 
@@ -137,7 +138,7 @@ public class MarshalStream extends FilterOutputStream {
         return fixnum.getLongValue() <= RubyFixnum.MAX_MARSHAL_FIXNUM && fixnum.getLongValue() >= RubyFixnum.MIN_MARSHAL_FIXNUM;
     }
 
-    private void writeAndRegisterSymbol(String sym) throws IOException {
+    private void writeAndRegisterSymbol(ByteList sym) throws IOException {
         if (cache.isSymbolRegistered(sym)) {
             cache.writeSymbolLink(this, sym);
         } else {
@@ -147,7 +148,10 @@ public class MarshalStream extends FilterOutputStream {
     }
 
     private void writeAndRegister(IRubyObject value) throws IOException {
-        if (cache.isRegistered(value)) {
+        ByteList sym;
+        if (value instanceof RubySymbol && cache.isSymbolRegistered(sym = ((RubySymbol) value).getBytes())) {
+            cache.writeSymbolLink(this, sym);
+        } else if (!(value instanceof RubySymbol) && cache.isRegistered(value)) {
             cache.writeLink(this, value);
         } else {
             value.getMetaClass().smartDump(this, value);
@@ -171,8 +175,14 @@ public class MarshalStream extends FilterOutputStream {
 
                     variables = value.getVariableList();
 
-                    // write `I' instance var signet if class is NOT a direct subclass of Object
-                    write(TYPE_IVAR);
+                    // check if any of those variables were actually set
+                    if (variables.size() > 0 || shouldMarshalEncoding(value)) {
+                        // write `I' instance var signet if class is NOT a direct subclass of Object
+                        write(TYPE_IVAR);
+                    } else {
+                        // no variables, no encoding
+                        variables = null;
+                    }
                 }
                 RubyClass type = value.getMetaClass();
                 switch(nativeClassIndex) {
@@ -184,7 +194,10 @@ public class MarshalStream extends FilterOutputStream {
                     break;
                 }
 
-                if (nativeClassIndex != value.getMetaClass().getClassIndex() && nativeClassIndex != ClassIndex.STRUCT) {
+                if (nativeClassIndex != value.getMetaClass().getClassIndex() &&
+                        nativeClassIndex != ClassIndex.STRUCT &&
+                        nativeClassIndex != ClassIndex.FIXNUM &&
+                        nativeClassIndex != ClassIndex.BIGNUM) {
                     // object is a custom class that extended one of the native types other than Object
                     writeUserClass(value, type);
                 }
@@ -207,19 +220,25 @@ public class MarshalStream extends FilterOutputStream {
     }
 
     public static String getPathFromClass(RubyModule clazz) {
-        String path = clazz.getName();
+        RubyString path = clazz.rubyName();
         
         if (path.charAt(0) == '#') {
-            String classOrModule = clazz.isClass() ? "class" : "module";
-            throw clazz.getRuntime().newTypeError("can't dump anonymous " + classOrModule + " " + path);
+            Ruby runtime = clazz.getRuntime();
+            String type = clazz.isClass() ? "class" : "module";
+            throw runtime.newTypeError(str(runtime, "can't dump anonymous " + type + " ", types(runtime, clazz)));
         }
         
         RubyModule real = clazz.isModule() ? clazz : ((RubyClass)clazz).getRealClass();
+        Ruby runtime = clazz.getRuntime();
 
-        if (clazz.getRuntime().getClassFromPath(path) != real) {
-            throw clazz.getRuntime().newTypeError(path + " can't be referred");
+        // FIXME: This is weird why we do this.  rubyName should produce something which can be referred so what example
+        // will this fail on?  If there is a failing case then passing asJavaString may be broken since it will not be
+        // a properly encoded string.  If this is an issue we should make a clazz.IdPath where all segments are returned
+        // by their id names.
+        if (runtime.getClassFromPath(path.asJavaString()) != real) {
+            throw runtime.newTypeError(str(runtime, types(runtime, clazz), " can't be referred"));
         }
-        return path;
+        return path.asJavaString();
     }
     
     private void writeObjectData(IRubyObject value) throws IOException {
@@ -228,7 +247,9 @@ public class MarshalStream extends FilterOutputStream {
         // marshalling logic.
         if (value instanceof CoreObjectType) {
             if (value instanceof DataType) {
-                throw value.getRuntime().newTypeError("no marshal_dump is defined for class " + value.getMetaClass().getName());
+                Ruby runtime = value.getRuntime();
+
+                throw runtime.newTypeError(str(runtime, "no _dump_data is defined for class ", types(runtime, value.getMetaClass())));
             }
             ClassIndex nativeClassIndex = ((CoreObjectType)value).getNativeClassIndex();
 
@@ -240,7 +261,7 @@ public class MarshalStream extends FilterOutputStream {
             case FALSE:
                 write('F');
                 return;
-            case FIXNUM: {
+            case FIXNUM:
                 RubyFixnum fixnum = (RubyFixnum)value;
 
                 if (isMarshalFixnum(fixnum)) {
@@ -252,7 +273,6 @@ public class MarshalStream extends FilterOutputStream {
                 value = RubyBignum.newBignum(value.getRuntime(), fixnum.getLongValue());
 
                 // fall through
-            }
             case BIGNUM:
                 write('l');
                 RubyBignum.marshalTo((RubyBignum)value, this);
@@ -305,13 +325,13 @@ public class MarshalStream extends FilterOutputStream {
                 RubyStruct.marshalTo((RubyStruct)value, this);
                 return;
             case SYMBOL:
-                writeAndRegisterSymbol(((RubySymbol)value).asJavaString());
+                writeAndRegisterSymbol(((RubySymbol) value).getBytes());
                 return;
             case TRUE:
                 write('T');
                 return;
             default:
-                throw runtime.newTypeError("can't dump " + value.getMetaClass().getName());
+                throw runtime.newTypeError(str(runtime, "can't dump ", types(runtime, value.getMetaClass())));
             }
         } else {
             dumpDefaultObjectHeader(value.getMetaClass());
@@ -331,13 +351,16 @@ public class MarshalStream extends FilterOutputStream {
         registerLinkTarget(value);
         write(TYPE_USRMARSHAL);
         RubyClass metaclass = value.getMetaClass().getRealClass();
-        writeAndRegisterSymbol(metaclass.getName());
+        writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, metaclass.getName()).getBytes());
 
         IRubyObject marshaled;
         if (method != null) {
             marshaled = method.call(runtime.getCurrentContext(), value, value.getMetaClass(), "marshal_dump");
         } else {
             marshaled = value.callMethod(runtime.getCurrentContext(), "marshal_dump");
+        }
+        if (marshaled.getMetaClass() == value.getMetaClass()) {
+            throw runtime.newRuntimeError("marshal_dump returned same class instance");
         }
         dumpObject(marshaled);
     }
@@ -365,20 +388,25 @@ public class MarshalStream extends FilterOutputStream {
         }
         RubyString marshaled = (RubyString)dumpResult;
 
-        boolean hasVars;
-        if (hasVars = marshaled.hasVariables()) {
-            write(TYPE_IVAR);
+        List<Variable<Object>> variables = null;
+        if (marshaled.hasVariables()) {
+            variables = marshaled.getVariableList();
+            if (variables.size() > 0) {
+                write(TYPE_IVAR);
+            } else {
+                variables = null;
+            }
         }
 
         write(TYPE_USERDEF);
         RubyClass metaclass = value.getMetaClass().getRealClass();
 
-        writeAndRegisterSymbol(metaclass.getName());
+        writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, metaclass.getName()).getBytes());
 
         writeString(marshaled.getByteList());
 
-        if (hasVars) {
-            dumpVariables(marshaled.getVariableList());
+        if (variables != null) {
+            dumpVariables(variables);
         }
 
         registerLinkTarget(value);
@@ -389,11 +417,13 @@ public class MarshalStream extends FilterOutputStream {
         
         // w_unique
         if (type.getName().charAt(0) == '#') {
-            throw obj.getRuntime().newTypeError("can't dump anonymous class " + type.getName());
+            Ruby runtime = obj.getRuntime();
+
+            throw runtime.newTypeError(str(runtime, "can't dump anonymous class ", types(runtime, type)));
         }
         
         // w_symbol
-        writeAndRegisterSymbol(type.getName());
+        writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, type.getName()).getBytes());
     }
     
     public void dumpVariablesWithEncoding(List<Variable<Object>> vars, IRubyObject obj) throws IOException {
@@ -415,7 +445,7 @@ public class MarshalStream extends FilterOutputStream {
     private void dumpVariablesShared(List<Variable<Object>> vars) throws IOException {
         for (Variable<Object> var : vars) {
             if (var.getValue() instanceof IRubyObject) {
-                writeAndRegisterSymbol(var.getName());
+                writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, var.getName()).getBytes());
                 dumpObject((IRubyObject)var.getValue());
             }
         }
@@ -423,13 +453,13 @@ public class MarshalStream extends FilterOutputStream {
 
     public void writeEncoding(Encoding encoding) throws IOException {
         if (encoding == null || encoding == USASCIIEncoding.INSTANCE) {
-            writeAndRegisterSymbol(SYMBOL_ENCODING_SPECIAL);
+            writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, SYMBOL_ENCODING_SPECIAL).getBytes());
             writeObjectData(runtime.getFalse());
         } else if (encoding == UTF8Encoding.INSTANCE) {
-            writeAndRegisterSymbol(SYMBOL_ENCODING_SPECIAL);
+            writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, SYMBOL_ENCODING_SPECIAL).getBytes());
             writeObjectData(runtime.getTrue());
         } else {
-            writeAndRegisterSymbol(SYMBOL_ENCODING);
+            writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, SYMBOL_ENCODING).getBytes());
             RubyString encodingString = new RubyString(runtime, runtime.getString(), encoding.getName());
             writeObjectData(encodingString);
         }
@@ -457,7 +487,7 @@ public class MarshalStream extends FilterOutputStream {
         }
         while(type.isIncluded()) {
             write('e');
-            writeAndRegisterSymbol(((IncludedModuleWrapper)type).getNonIncludedClass().getName());
+            writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, type.getNonIncludedClass().getName()).getBytes());
             type = type.getSuperClass();
         }
         return type;
@@ -470,7 +500,7 @@ public class MarshalStream extends FilterOutputStream {
     public void dumpDefaultObjectHeader(char tp, RubyClass type) throws IOException {
         dumpExtended(type);
         write(tp);
-        writeAndRegisterSymbol(getPathFromClass(type.getRealClass()));
+        writeAndRegisterSymbol(RubySymbol.newSymbol(runtime, getPathFromClass(type.getRealClass())).getBytes());
     }
 
     public void writeString(String value) throws IOException {
@@ -485,9 +515,11 @@ public class MarshalStream extends FilterOutputStream {
         out.write(value.getUnsafeBytes(), value.begin(), len);
     }
 
-    public void dumpSymbol(String value) throws IOException {
+    public void dumpSymbol(ByteList value) throws IOException {
         write(':');
-        writeString(value);
+        int len = value.length();
+        writeInt(len);
+        out.write(value.getUnsafeBytes(), value.begin(), len);
     }
 
     public void writeInt(int value) throws IOException {

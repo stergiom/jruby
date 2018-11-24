@@ -1,6 +1,6 @@
 # -*- encoding: utf-8 -*-
-require File.expand_path('../../../spec_helper', __FILE__)
-require File.expand_path('../fixtures/classes.rb', __FILE__)
+require_relative '../../spec_helper'
+require_relative 'fixtures/classes'
 
 describe "String#split with String" do
   with_feature :encoding do
@@ -300,6 +300,10 @@ describe "String#split with Regexp" do
     "AabB".split(/([a-z])+/).should == ["A", "b", "B"]
   end
 
+  it "applies the limit to the number of split substrings, without counting captures" do
+    "aBaBa".split(/(B)()()/, 2).should == ["a", "B", "", "", "aBa"]
+  end
+
   it "does not include non-matching captures in the result array" do
     "hello".split(/(el)|(xx)/).should == ["h", "el", "lo"]
   end
@@ -397,5 +401,15 @@ describe "String#split with Regexp" do
     broken_str.chop!
     broken_str.force_encoding('utf-8')
     lambda{ broken_str.split(/\r\n|\r|\n/) }.should raise_error(ArgumentError)
+  end
+
+  ruby_version_is "2.6" do
+    it "yields each split substrings if a block is given" do
+      a = []
+      returned_object = "chunky bacon".split(" ") { |str| a << str.capitalize }
+
+      returned_object.should == "chunky bacon"
+      a.should == ["Chunky", "Bacon"]
+    end
   end
 end

@@ -20,6 +20,14 @@ case "`uname`" in
   MINGW*) jruby.exe "$@"; exit $?;;
 esac
 
+# ----- Determine how to call expr (jruby/jruby#5091) -------------------------
+# On Alpine linux, expr takes no -- arguments, and 'expr --' echoes '--'.
+_expr_dashed=$(expr -- 2>/dev/null)
+if [ "$_expr_dashed" != '--' ] ; then
+  alias expr="expr --"
+fi
+unset _expr_dashed
+
 # ----- Verify and Set Required Environment Variables -------------------------
 if [ -z "$JAVA_VM" ]; then
   JAVA_VM=-client
@@ -180,6 +188,14 @@ fi
 # ----- Execute The Requested Command -----------------------------------------
 JAVA_ENCODING=""
 
+if [ -r "/dev/urandom" ]; then
+  # OpenJDK tries really hard to prevent you from using urandom.
+  # See https://bugs.openjdk.java.net/browse/JDK-6202721
+  # Non-file URL causes fallback to slow threaded SeedGenerator.
+  # See https://bz.apache.org/bugzilla/show_bug.cgi?id=56139
+  JAVA_SECURITY_EGD="file:/dev/urandom"
+fi
+
 declare -a java_args
 declare -a ruby_args
 mode=""
@@ -219,23 +235,16 @@ do
             CP="$CP$CP_DELIMITER$2"
             CLASSPATH=""
             shift
-        elif [ "${val:0:3}" = "-G:" ]; then # Graal options
-            opt=${val:3}
-            case $opt in
-              +*)
-                opt="${opt:1}=true" ;;
-              -*)
-                opt="${opt:1}=false" ;;
-            esac
-            echo "$1 is deprecated - use -J-Dgraal.$opt instead" >&2
-            java_args=("${java_args[@]}" "-Dgraal.$opt")
         else
             if [ "${val:0:3}" = "-ea" ]; then
                 VERIFY_JRUBY="yes"
             elif [ "${val:0:16}" = "-Dfile.encoding=" ]; then
-                JAVA_ENCODING=$val
+                JAVA_ENCODING=${val:16}
+            elif [ "${val:0:20}" = "-Djava.security.egd=" ]; then
+                JAVA_SECURITY_EGD=${val:20}
+            else
+                java_args=("${java_args[@]}" "${1:2}")
             fi
-            java_args=("${java_args[@]}" "${1:2}")
         fi
         ;;
      # Pass -X... and -X? search options through
@@ -272,7 +281,8 @@ do
             JAVACMD="$JAVA_HOME/bin/jdb"
           fi
         fi 
-        java_args=("${java_args[@]}" "-sourcepath" "$JRUBY_HOME/lib/ruby/1.9:.")
+        JDB_SOURCEPATH="${JRUBY_HOME}/core/src/main/java:${JRUBY_HOME}/lib/ruby/stdlib:."
+        java_args=("${java_args[@]}" "-sourcepath" "$JDB_SOURCEPATH")
         JRUBY_OPTS=("${JRUBY_OPTS[@]}" "-X+C") ;;
      --client)
         JAVA_VM=-client ;;
@@ -313,6 +323,14 @@ done
 # Force file.encoding to UTF-8 when on Mac, since Apple JDK defaults to MacRoman (JRUBY-3576)
 if [[ $darwin && -z "$JAVA_ENCODING" ]]; then
   java_args=("${java_args[@]}" "-Dfile.encoding=UTF-8")
+elif [[ -n "$JAVA_ENCODING" ]]; then
+  java_args=("${java_args[@]}" "-Dfile.encoding=$JAVA_ENCODING")
+fi
+
+# Force OpenJDK-based JVMs to use /dev/urandom for random number generation
+# See https://github.com/jruby/jruby/issues/4685 among others.
+if [[ -n "$JAVA_SECURITY_EGD" ]]; then
+  java_args=("${java_args[@]}" "-Djava.security.egd=$JAVA_SECURITY_EGD")
 fi
 
 # Append the rest of the arguments
@@ -344,6 +362,30 @@ if $cygwin; then
 
 fi
 
+# Allow overriding default JSA file location
+if [ "$JRUBY_JSA" == "" ]; then
+  JRUBY_JSA=${JRUBY_HOME}/lib/jruby.jsa
+fi
+
+# Determine whether to pass module-related flags
+classmod_flag="-classpath"
+if [ -d $JAVA_HOME/jmods ]; then
+  # Use module path instead of classpath
+  classmod_flag="--module-path"
+
+  # Switch to non-boot path since we can't use bootclasspath on 9+
+  NO_BOOTCLASSPATH=1
+
+  # If we have a jruby.jsa file, enable AppCDS
+  if [ -f $JRUBY_JSA ]; then
+    JAVA_OPTS="$JAVA_OPTS -XX:+UnlockDiagnosticVMOptions -XX:SharedArchiveFile=$JRUBY_JSA"
+  fi
+
+  # Add base opens we need for Ruby compatibility
+  JAVA_OPTS="$JAVA_OPTS --add-opens java.base/java.io=org.jruby.dist --add-opens java.base/java.nio.channels=org.jruby.dist"
+fi
+
+# Run JRuby!
 if [ "$nailgun_client" != "" ]; then
   if [ -f $JRUBY_HOME/tool/nailgun/ng ]; then
     exec $JRUBY_HOME/tool/nailgun/ng org.jruby.util.NailMain $mode "$@"
@@ -362,7 +404,7 @@ if [[ "$NO_BOOTCLASSPATH" != "" || "$VERIFY_JRUBY" != "" ]]; then
     JRUBY_OPTS=''
   fi
 
-  "$JAVACMD" $PROFILE_ARGS $JAVA_OPTS "$JFFI_OPTS" "${java_args[@]}" -classpath "$JRUBY_CP$CP_DELIMITER$CP$CP_DELIMITER$CLASSPATH" \
+  "$JAVACMD" $PROFILE_ARGS $JAVA_OPTS "$JFFI_OPTS" "${java_args[@]}" ${classmod_flag} "$JRUBY_CP$CP_DELIMITER$CP$CP_DELIMITER$CLASSPATH" \
     "-Djruby.home=$JRUBY_HOME" \
     "-Djruby.lib=$JRUBY_HOME/lib" -Djruby.script=jruby \
     "-Djruby.shell=$JRUBY_SHELL" \

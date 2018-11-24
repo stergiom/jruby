@@ -23,6 +23,10 @@
    (RUBY_VERSION_MAJOR == (major) && RUBY_VERSION_MINOR < (minor)) || \
    (RUBY_VERSION_MAJOR == (major) && RUBY_VERSION_MINOR == (minor) && RUBY_VERSION_TEENY < (teeny)))
 
+#if RUBY_VERSION_MAJOR > 2 || (RUBY_VERSION_MAJOR == 2 && RUBY_VERSION_MINOR >= 6)
+#define RUBY_VERSION_IS_2_6
+#endif
+
 #if RUBY_VERSION_MAJOR > 2 || (RUBY_VERSION_MAJOR == 2 && RUBY_VERSION_MINOR >= 4)
 #define RUBY_VERSION_IS_2_4
 #endif
@@ -204,7 +208,9 @@
 #define HAVE_RB_DEFAULT_INTERNAL_ENCODING  1
 #define HAVE_RB_DEFAULT_EXTERNAL_ENCODING  1
 
-#define HAVE_RB_ENCDB_ALIAS                1
+#ifdef RUBY_VERSION_IS_2_6
+#define HAVE_RB_ENC_ALIAS                  1
+#endif
 #define HAVE_RB_ENC_ASSOCIATE              1
 #define HAVE_RB_ENC_ASSOCIATE_INDEX        1
 #define HAVE_RB_ENC_CODEPOINT_LEN          1
@@ -252,6 +258,7 @@
 
 /* Enumerable */
 #define HAVE_RB_ENUMERATORIZE              1
+#define HAVE_RB_ENUMERATORIZE_WITH_SIZE    1
 
 /* Exception */
 #define HAVE_RB_EXC_NEW                    1
@@ -299,6 +306,7 @@
 #define HAVE_RB_HASH_CLEAR                 1
 #define HAVE_RB_HASH_DELETE                1
 #define HAVE_RB_HASH_DELETE_IF             1
+#define HAVE_RB_HASH_FETCH                 1
 #define HAVE_RB_HASH_FOREACH               1
 #define HAVE_RB_HASH_LOOKUP                1
 #define HAVE_RB_HASH_LOOKUP2               1
@@ -347,6 +355,7 @@
 #define HAVE_RB_ENSURE                     1
 #define HAVE_RB_EVAL_STRING                1
 #define HAVE_RB_EXEC_RECURSIVE             1
+#define HAVE_RB_FRAME_THIS_FUNC             1
 #define HAVE_RB_F_SPRINTF                  1
 #define HAVE_RB_NEED_BLOCK                 1
 #define HAVE_RB_RAISE                      1
@@ -372,6 +381,7 @@
 #define HAVE_RB_GC_REGISTER_ADDRESS        1
 #define HAVE_RB_GC_ENABLE                  1
 #define HAVE_RB_GC_DISABLE                 1
+#define HAVE_RB_GC                         1
 
 /* Marshal */
 #define HAVE_RB_MARSHAL_DUMP               1
@@ -399,6 +409,7 @@
 #define HAVE_RB_DEFINE_PRIVATE_METHOD      1
 #define HAVE_RB_DEFINE_PROTECTED_METHOD    1
 #define HAVE_RB_DEFINE_SINGLETON_METHOD    1
+#define HAVE_RB_MOD_ANCESTORS              1
 #define HAVE_RB_UNDEF                      1
 #define HAVE_RB_UNDEF_METHOD               1
 
@@ -406,8 +417,10 @@
 #define HAVE_NUM2CHR                       1
 #define HAVE_RB_CMPINT                     1
 #define HAVE_RB_INT2INUM                   1
+#define HAVE_RB_UINT2INUM                  1
 #define HAVE_RB_INTEGER                    1
 #define HAVE_RB_LL2INUM                    1
+#define HAVE_RB_ULL2INUM                   1
 #define HAVE_RB_NUM2DBL                    1
 #if SIZEOF_INT < SIZEOF_LONG
 #define HAVE_RB_NUM2INT                    1
@@ -419,6 +432,7 @@
 #define HAVE_RB_NUM_COERCE_BIN             1
 #define HAVE_RB_NUM_COERCE_CMP             1
 #define HAVE_RB_NUM_COERCE_RELOP           1
+#define HAVE_RB_ABSINT_SINGLEBIT_P         1
 #define HAVE_RB_NUM_ZERODIV                1
 
 /* Fixnum */
@@ -428,6 +442,8 @@
 #endif
 
 /* Object */
+#define HAVE_FL_ABLE                       1
+#define HAVE_FL_TEST                       1
 #define HAVE_OBJ_TAINT                     1
 #define HAVE_OBJ_TAINTED                   1
 #define HAVE_OBJ_INFECT                    1
@@ -476,10 +492,13 @@
 
 /* Proc */
 #define HAVE_RB_PROC_NEW                   1
+#define HAVE_RB_PROC_ARITY                 1
+#define HAVE_RB_PROC_CALL                  1
 
 /* Range */
 #define HAVE_RB_RANGE_NEW                  1
 #define HAVE_RB_RANGE_VALUES               1
+#define HAVE_RB_RANGE_BEG_LEN              1
 
 /* Rational */
 #define HAVE_RB_RATIONAL                   1
@@ -498,6 +517,9 @@
 #define HAVE_RB_REG_NTH_MATCH              1
 #define HAVE_RB_REG_OPTIONS                1
 #define HAVE_RB_REG_REGCOMP                1
+
+/* st */
+#define HAVE_RB_ST                         1
 
 /* String */
 #define HAVE_RB_CSTR2INUM                  1
@@ -522,6 +544,8 @@
 #define HAVE_RB_STR_NEW3                   1
 #define HAVE_RB_STR_NEW4                   1
 #define HAVE_RB_STR_NEW5                   1
+#define HAVE_RB_TAINTED_STR_NEW            1
+#define HAVE_RB_TAINTED_STR_NEW2           1
 #define HAVE_RB_STR_PLUS                   1
 #define HAVE_RB_STR_TIMES                  1
 #define HAVE_RB_STR_RESIZE                 1
@@ -546,6 +570,8 @@
 #define HAVE_RB_STR_SUBSEQ                 1
 #define HAVE_RB_VSPRINTF                   1
 #define HAVE_RB_STRING                     1
+#define HAVE_SAFE_STRING_VALUE             1
+#define HAVE_RB_STRING_VALUE_CSTR          1
 
 /* Struct */
 #define HAVE_RB_STRUCT_AREF                1
@@ -594,20 +620,5 @@
 
 /* Util */
 #define HAVE_RB_SCAN_ARGS                  1
-
-/* Now, create the differential set. The format of the preprocessor directives
- * is significant. The alternative implementations should define RUBY because
- * some extensions depend on that. But only one alternative implementation
- * macro should be defined at a time. The conditional is structured so that if
- * no alternative implementation is defined then MRI is assumed.
- */
-
-#if defined(RUBINIUS)
-#include "rubinius.h"
-#elif defined(JRUBY)
-#include "jruby.h"
-#elif defined(TRUFFLERUBY)
-#include "truffleruby.h"
-#endif
 
 #endif
